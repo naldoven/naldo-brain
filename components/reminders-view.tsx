@@ -113,7 +113,7 @@ export function RemindersView({ initialReminders }: Props) {
       </div>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6">
         <StatCard label="Active" value={stats.active} sub="Currently live" color="pink" />
         <StatCard label="Recurring" value={stats.recurring} sub="Repeating" color="blue" />
         <StatCard label="Completed" value={stats.completed} sub="Done successfully" color="cyan" />

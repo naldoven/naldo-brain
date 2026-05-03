@@ -205,7 +205,7 @@ export function ChatView({ initialMessages, recentCaptures, memories }: Props) {
   }
 
   return (
-    <div className="flex h-[calc(100vh-3rem)] gap-4">
+    <div className="flex h-[calc(100vh-7rem)] md:h-[calc(100vh-3rem)] gap-4">
       {/* Main chat panel */}
       <div className="flex-1 flex flex-col glass-strong rounded-2xl overflow-hidden">
         {/* Header */}
@@ -350,7 +350,7 @@ export function ChatView({ initialMessages, recentCaptures, memories }: Props) {
       </div>
 
       {/* Right rail */}
-      <div className="w-72 flex flex-col gap-4 overflow-y-auto">
+      <div className="hidden lg:flex w-72 flex-col gap-4 overflow-y-auto">
         <div className="glass rounded-2xl p-4">
           <h3 className="font-bold text-sm mb-3">Recent Captures</h3>
           {recentCaptures.length === 0 ? (

@@ -110,7 +110,7 @@ export function CalendarView({ initialEvents }: Props) {
         </button>
       </div>
 
-      <div className="grid grid-cols-[1fr_320px] gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4">
         {/* Month grid */}
         <div className="glass-strong rounded-2xl p-5">
           <div className="flex items-center justify-between mb-4">

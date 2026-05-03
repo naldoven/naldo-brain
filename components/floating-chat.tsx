@@ -189,7 +189,10 @@ export function FloatingChat() {
       {open && (
         <div
           className="glass-strong rounded-2xl flex flex-col overflow-hidden"
-          style={{ width: 380, height: 540 }}
+          style={{
+            width: "min(380px, calc(100vw - 24px))",
+            height: "min(540px, calc(100vh - 100px))",
+          }}
         >
           {/* Header */}
           <div className="border-b border-white/10 p-3 flex items-center gap-2">
