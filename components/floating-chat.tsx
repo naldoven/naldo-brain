@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
-import { MessageCircle, X, Send, Mic, Camera } from "lucide-react";
+import { MessageCircle, X, Send, Mic, MicOff, Camera } from "lucide-react";
 import { toast } from "sonner";
 
 type Message = {
@@ -12,15 +12,38 @@ type Message = {
   created_at: string;
 };
 
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start: () => void;
+  stop: () => void;
+  onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((e: { error: string }) => void) | null;
+};
+
+function getSpeechRecognition(): (new () => SpeechRecognitionLike) | null {
+  if (typeof window === "undefined") return null;
+  const w = window as unknown as {
+    SpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+  };
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
+}
+
 export function FloatingChat() {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [pendingImage, setPendingImage] = useState<{ dataUrl: string; mediaType: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load recent messages once when opened
   useEffect(() => {
     if (!open || hasLoaded) return;
     setHasLoaded(true);
@@ -42,23 +65,28 @@ export function FloatingChat() {
 
   async function send() {
     const text = input.trim();
-    if (!text || sending) return;
+    if ((!text && !pendingImage) || sending) return;
     setSending(true);
 
     const optimistic: Message = {
       id: `local-${Date.now()}`,
       role: "user",
-      content: text,
+      content: text || "(image)",
       created_at: new Date().toISOString(),
     };
     setMessages((m) => [...m, optimistic]);
     setInput("");
+    const sentImage = pendingImage;
+    setPendingImage(null);
 
     try {
+      const attachments = sentImage
+        ? [{ type: "image", mediaType: sentImage.mediaType, data: sentImage.dataUrl }]
+        : [];
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, attachments }),
       });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
@@ -81,6 +109,65 @@ export function FloatingChat() {
     } finally {
       setSending(false);
     }
+  }
+
+  function toggleVoice() {
+    if (listening && recognitionRef.current) {
+      recognitionRef.current.stop();
+      setListening(false);
+      return;
+    }
+    const SR = getSpeechRecognition();
+    if (!SR) {
+      toast.error("Voice not supported in this browser.");
+      return;
+    }
+    const recognition = new SR();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((r) => r[0].transcript)
+        .join(" ");
+      setInput(transcript);
+    };
+    recognition.onend = () => setListening(false);
+    recognition.onerror = (e) => {
+      setListening(false);
+      if (e.error !== "no-speech") {
+        toast.error(`Voice error: ${e.error}`);
+      }
+    };
+    recognition.start();
+    recognitionRef.current = recognition;
+    setListening(true);
+  }
+
+  function pickImage() {
+    fileInputRef.current?.click();
+  }
+
+  function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Image too large (max 5MB)");
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      toast.error("Only images supported");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setPendingImage({
+        dataUrl: reader.result as string,
+        mediaType: file.type,
+      });
+    };
+    reader.readAsDataURL(file);
   }
 
   return (
@@ -176,15 +263,36 @@ export function FloatingChat() {
             )}
           </div>
 
+          {pendingImage && (
+            <div className="px-3 py-2 bg-white/5 border-t border-white/10 flex items-center gap-2">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={pendingImage.dataUrl} className="size-8 rounded object-cover" alt="preview" />
+              <span className="text-xs flex-1">Image attached</span>
+              <button
+                onClick={() => setPendingImage(null)}
+                className="size-5 hover:bg-white/10 rounded-full flex items-center justify-center"
+              >
+                <X className="size-3" />
+              </button>
+            </div>
+          )}
+
           {/* Input */}
           <div className="border-t border-white/10 p-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={onFileChange}
+            />
             <div className="glass rounded-full flex items-center gap-1 p-1.5">
               <button
-                disabled
+                onClick={pickImage}
                 className="size-7 hover:bg-white/10 rounded-full flex items-center justify-center"
-                title="Image (Phase 2.5)"
+                title="Attach image"
               >
-                <Camera className="size-3.5 opacity-50" />
+                <Camera className="size-3.5" />
               </button>
               <input
                 type="text"
@@ -196,20 +304,24 @@ export function FloatingChat() {
                     send();
                   }
                 }}
-                placeholder="Message Brain..."
+                placeholder={pendingImage ? "Caption..." : "Message Brain..."}
                 disabled={sending}
                 className="flex-1 bg-transparent text-xs placeholder-zinc-500 focus:outline-none px-1"
               />
               <button
-                disabled
-                className="size-7 bg-red-500/20 hover:bg-red-500/30 rounded-full flex items-center justify-center"
-                title="Voice (Phase 2.5)"
+                onClick={toggleVoice}
+                className={
+                  listening
+                    ? "size-7 bg-red-500 rounded-full flex items-center justify-center text-white animate-pulse"
+                    : "size-7 bg-red-500/20 hover:bg-red-500/30 rounded-full flex items-center justify-center"
+                }
+                title={listening ? "Stop" : "Voice"}
               >
-                <Mic className="size-3.5 opacity-50" />
+                {listening ? <MicOff className="size-3.5" /> : <Mic className="size-3.5" />}
               </button>
               <button
                 onClick={send}
-                disabled={sending || !input.trim()}
+                disabled={sending || (!input.trim() && !pendingImage)}
                 className="size-7 brand-gradient rounded-full flex items-center justify-center text-white disabled:opacity-50"
               >
                 <Send className="size-3.5" />

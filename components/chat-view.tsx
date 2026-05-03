@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, FormEvent } from "react";
-import { Send, Mic, Camera, Paperclip, Sparkles } from "lucide-react";
+import { Send, Mic, MicOff, Camera, Paperclip, Sparkles, X } from "lucide-react";
 import { toast } from "sonner";
 
 type ChatMessage = {
@@ -20,10 +20,7 @@ type Capture = {
   created_at: string;
 };
 
-type Memory = {
-  subject: string;
-  fact: string;
-};
+type Memory = { subject: string; fact: string };
 
 type Props = {
   initialMessages: ChatMessage[];
@@ -39,11 +36,39 @@ const QUICK_PROMPTS = [
   "⚠ What am I avoiding?",
 ];
 
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start: () => void;
+  stop: () => void;
+  onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((e: { error: string }) => void) | null;
+};
+
+function getSpeechRecognition(): (new () => SpeechRecognitionLike) | null {
+  if (typeof window === "undefined") return null;
+  const w = window as unknown as {
+    SpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+  };
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
+}
+
 export function ChatView({ initialMessages, recentCaptures, memories }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [pendingImage, setPendingImage] = useState<{
+    dataUrl: string;
+    mediaType: string;
+    fileName: string;
+  } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -52,26 +77,36 @@ export function ChatView({ initialMessages, recentCaptures, memories }: Props) {
     });
   }, [messages]);
 
-  async function sendMessage(text: string) {
+  async function sendMessage(
+    text: string,
+    image?: { dataUrl: string; mediaType: string }
+  ) {
     const trimmed = text.trim();
-    if (!trimmed || sending) return;
+    if (!trimmed && !image) return;
+    if (sending) return;
 
     setSending(true);
+    const optimisticContent = trimmed || (image ? "(image)" : "");
     const optimistic: ChatMessage = {
       id: `local-${Date.now()}`,
       role: "user",
-      content: trimmed,
+      content: optimisticContent,
       channel: "web",
       created_at: new Date().toISOString(),
     };
     setMessages((m) => [...m, optimistic]);
     setInput("");
+    setPendingImage(null);
 
     try {
+      const attachments = image
+        ? [{ type: "image", mediaType: image.mediaType, data: image.dataUrl }]
+        : [];
+
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: trimmed }),
+        body: JSON.stringify({ message: trimmed, attachments }),
       });
 
       if (!res.ok) {
@@ -99,7 +134,71 @@ export function ChatView({ initialMessages, recentCaptures, memories }: Props) {
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    sendMessage(input);
+    sendMessage(
+      input,
+      pendingImage ? { dataUrl: pendingImage.dataUrl, mediaType: pendingImage.mediaType } : undefined
+    );
+  }
+
+  function toggleVoice() {
+    if (listening && recognitionRef.current) {
+      recognitionRef.current.stop();
+      setListening(false);
+      return;
+    }
+    const SR = getSpeechRecognition();
+    if (!SR) {
+      toast.error("Voice not supported in this browser. Try Chrome, Edge, or Safari.");
+      return;
+    }
+    const recognition = new SR();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((r) => r[0].transcript)
+        .join(" ");
+      setInput(transcript);
+    };
+    recognition.onend = () => setListening(false);
+    recognition.onerror = (e) => {
+      setListening(false);
+      if (e.error !== "no-speech") {
+        toast.error(`Voice error: ${e.error}`);
+      }
+    };
+    recognition.start();
+    recognitionRef.current = recognition;
+    setListening(true);
+  }
+
+  function pickImage() {
+    fileInputRef.current?.click();
+  }
+
+  function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting same file
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Image too large (max 5MB)");
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      toast.error("Only image files supported right now");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setPendingImage({
+        dataUrl: reader.result as string,
+        mediaType: file.type,
+        fileName: file.name,
+      });
+    };
+    reader.onerror = () => toast.error("Couldn't read file");
+    reader.readAsDataURL(file);
   }
 
   return (
@@ -121,10 +220,7 @@ export function ChatView({ initialMessages, recentCaptures, memories }: Props) {
         </div>
 
         {/* Conversation */}
-        <div
-          ref={scrollRef}
-          className="flex-1 overflow-y-auto p-6 space-y-4"
-        >
+        <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4">
           {messages.length === 0 && (
             <div className="text-center text-zinc-400 py-12">
               <div className="text-3xl mb-2">👋</div>
@@ -150,23 +246,52 @@ export function ChatView({ initialMessages, recentCaptures, memories }: Props) {
           )}
         </div>
 
+        {/* Pending image preview */}
+        {pendingImage && (
+          <div className="border-t border-white/10 p-3 flex items-center gap-3 bg-white/5">
+            <img
+              src={pendingImage.dataUrl}
+              alt={pendingImage.fileName}
+              className="size-12 rounded object-cover border border-white/10"
+            />
+            <div className="flex-1 text-xs">
+              <div className="font-semibold truncate">{pendingImage.fileName}</div>
+              <div className="text-zinc-400">Image ready · will send with your message</div>
+            </div>
+            <button
+              onClick={() => setPendingImage(null)}
+              className="size-7 hover:bg-white/10 rounded-full flex items-center justify-center"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        )}
+
         {/* Input */}
         <div className="border-t border-white/10 p-4">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={onFileChange}
+          />
           <form onSubmit={onSubmit}>
             <div className="glass rounded-2xl flex items-center gap-2 p-2">
               <button
                 type="button"
+                onClick={pickImage}
+                disabled={sending}
                 className="size-10 rounded-full hover:bg-white/10 flex items-center justify-center"
-                title="Attach image (coming soon)"
-                disabled
+                title="Attach image"
               >
-                <Camera className="size-4 opacity-50" />
+                <Camera className="size-4" />
               </button>
               <button
                 type="button"
-                className="size-10 rounded-full hover:bg-white/10 flex items-center justify-center"
-                title="Attach PDF (coming soon)"
                 disabled
+                className="size-10 rounded-full hover:bg-white/10 flex items-center justify-center"
+                title="PDF (coming soon)"
               >
                 <Paperclip className="size-4 opacity-50" />
               </button>
@@ -174,21 +299,30 @@ export function ChatView({ initialMessages, recentCaptures, memories }: Props) {
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Type a message — or capture an idea, task, reminder..."
+                placeholder={
+                  pendingImage
+                    ? "Add a caption (optional)..."
+                    : "Type a message — or capture an idea, task, reminder..."
+                }
                 className="flex-1 bg-transparent text-sm placeholder-zinc-500 focus:outline-none px-2"
                 disabled={sending}
               />
               <button
                 type="button"
-                className="size-10 rounded-full bg-red-500/20 hover:bg-red-500/30 flex items-center justify-center"
-                title="Voice message (coming soon)"
-                disabled
+                onClick={toggleVoice}
+                disabled={sending}
+                className={
+                  listening
+                    ? "size-10 rounded-full bg-red-500 flex items-center justify-center text-white animate-pulse"
+                    : "size-10 rounded-full bg-red-500/20 hover:bg-red-500/30 flex items-center justify-center"
+                }
+                title={listening ? "Stop listening" : "Voice message"}
               >
-                <Mic className="size-4 opacity-50" />
+                {listening ? <MicOff className="size-4" /> : <Mic className="size-4" />}
               </button>
               <button
                 type="submit"
-                disabled={sending || !input.trim()}
+                disabled={sending || (!input.trim() && !pendingImage)}
                 className="px-5 py-2 brand-gradient rounded-full text-white text-sm font-semibold disabled:opacity-50 flex items-center gap-2"
               >
                 <Send className="size-3.5" />
@@ -265,12 +399,16 @@ export function ChatView({ initialMessages, recentCaptures, memories }: Props) {
               <span className="text-green-400">● Active</span>
             </li>
             <li className="flex justify-between">
-              <span>📱 WhatsApp</span>
-              <span className="text-zinc-500">○ Phase 2.5</span>
+              <span>🎤 Voice (web)</span>
+              <span className="text-green-400">● Active</span>
             </li>
             <li className="flex justify-between">
-              <span>📧 memorae@yulelovelights.com</span>
-              <span className="text-zinc-500">○ Phase 2.5</span>
+              <span>📷 Image</span>
+              <span className="text-green-400">● Active</span>
+            </li>
+            <li className="flex justify-between">
+              <span>📱 WhatsApp</span>
+              <span className="text-zinc-500">○ Phase 3</span>
             </li>
           </ul>
         </div>
