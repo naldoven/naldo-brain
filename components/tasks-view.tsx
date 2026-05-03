@@ -1,8 +1,19 @@
 "use client";
 
 import { useState, useMemo, FormEvent } from "react";
-import { Plus, Check, Trash2, MoreVertical, CheckCheck, Loader2 } from "lucide-react";
+import { Plus, Check, Trash2, MoreVertical, CheckCheck, Loader2, GripVertical } from "lucide-react";
 import { toast } from "sonner";
+import {
+  DndContext,
+  DragEndEvent,
+  DragOverlay,
+  DragStartEvent,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  useDraggable,
+  useDroppable,
+} from "@dnd-kit/core";
 
 type Board = {
   id: string;
@@ -34,6 +45,11 @@ type Props = {
 export function TasksView({ initialBoards, initialTasks }: Props) {
   const [boards, setBoards] = useState<Board[]>(initialBoards);
   const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
+  );
 
   const tasksByBoard = useMemo(() => {
     const map = new Map<string | null, Task[]>();
@@ -46,7 +62,43 @@ export function TasksView({ initialBoards, initialTasks }: Props) {
   }, [tasks]);
 
   const totalToday = tasks.filter((t) => t.status === "today").length;
-  const doneToday = 0; // Phase 2 — done tasks aren't loaded; could fetch separately
+  const doneToday = 0;
+
+  const activeTask = activeTaskId ? tasks.find((t) => t.id === activeTaskId) ?? null : null;
+
+  function onDragStart(e: DragStartEvent) {
+    const id = String(e.active.id);
+    if (id.startsWith("task-")) setActiveTaskId(id.replace("task-", ""));
+  }
+
+  async function onDragEnd(e: DragEndEvent) {
+    setActiveTaskId(null);
+    const { active, over } = e;
+    if (!over) return;
+
+    const taskId = String(active.id).replace("task-", "");
+    const overId = String(over.id);
+    if (!overId.startsWith("board-")) return;
+
+    const newBoardId = overId.replace("board-", "");
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task || task.board_id === newBoardId) return;
+
+    const prev = tasks;
+    setTasks((ts) =>
+      ts.map((t) => (t.id === taskId ? { ...t, board_id: newBoardId } : t))
+    );
+
+    const res = await fetch(`/api/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ board_id: newBoardId }),
+    });
+    if (!res.ok) {
+      setTasks(prev);
+      toast.error("Failed to move task");
+    }
+  }
 
   async function completeTask(id: string) {
     const prev = tasks;
@@ -106,10 +158,9 @@ export function TasksView({ initialBoards, initialTasks }: Props) {
     <div>
       <div className="mb-2">
         <h1 className="text-3xl font-bold">Your Boards</h1>
-        <p className="text-zinc-400">Boards with your upcoming tasks</p>
+        <p className="text-zinc-400">Drag tasks between boards. Hover a task for actions.</p>
       </div>
 
-      {/* Today progress bar */}
       <div className="mt-6 mb-6">
         <div className="flex justify-between text-sm mb-2">
           <span className="font-semibold">Today</span>
@@ -125,35 +176,41 @@ export function TasksView({ initialBoards, initialTasks }: Props) {
         </div>
       </div>
 
-      {/* Boards grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {boards.length === 0 && (
-          <div className="col-span-full glass-strong rounded-2xl p-8 text-center">
-            <CheckCheck className="size-12 mx-auto text-zinc-600 mb-3" />
-            <h3 className="font-bold mb-1">No boards yet</h3>
-            <p className="text-xs text-zinc-500 mb-4">
-              Run the seed function in Supabase or create your first board.
-            </p>
-            <CreateBoardInline onCreate={createBoard} />
-          </div>
-        )}
+      <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {boards.length === 0 && (
+            <div className="col-span-full glass-strong rounded-2xl p-8 text-center">
+              <CheckCheck className="size-12 mx-auto text-zinc-600 mb-3" />
+              <h3 className="font-bold mb-1">No boards yet</h3>
+              <p className="text-xs text-zinc-500 mb-4">
+                Run the seed function in Supabase or create your first board.
+              </p>
+              <CreateBoardInline onCreate={createBoard} />
+            </div>
+          )}
 
-        {boards.map((board) => {
-          const boardTasks = tasksByBoard.get(board.id) ?? [];
-          return (
-            <BoardCard
-              key={board.id}
-              board={board}
-              tasks={boardTasks}
-              onComplete={completeTask}
-              onDelete={deleteTask}
-              onAdd={(title) => addTask(board.id, title)}
-            />
-          );
-        })}
+          {boards.map((board) => {
+            const boardTasks = tasksByBoard.get(board.id) ?? [];
+            return (
+              <BoardCard
+                key={board.id}
+                board={board}
+                tasks={boardTasks}
+                onComplete={completeTask}
+                onDelete={deleteTask}
+                onAdd={(title) => addTask(board.id, title)}
+                isDraggingTask={activeTaskId !== null}
+              />
+            );
+          })}
 
-        {boards.length > 0 && <CreateBoardCard onCreate={createBoard} />}
-      </div>
+          {boards.length > 0 && <CreateBoardCard onCreate={createBoard} />}
+        </div>
+
+        <DragOverlay>
+          {activeTask ? <TaskCard task={activeTask} onComplete={() => {}} onDelete={() => {}} dragging /> : null}
+        </DragOverlay>
+      </DndContext>
     </div>
   );
 }
@@ -164,16 +221,19 @@ function BoardCard({
   onComplete,
   onDelete,
   onAdd,
+  isDraggingTask,
 }: {
   board: Board;
   tasks: Task[];
   onComplete: (id: string) => void;
   onDelete: (id: string) => void;
   onAdd: (title: string) => void;
+  isDraggingTask: boolean;
 }) {
   const [adding, setAdding] = useState("");
+  const { isOver, setNodeRef } = useDroppable({ id: `board-${board.id}` });
 
-  async function submit(e: FormEvent) {
+  function submit(e: FormEvent) {
     e.preventDefault();
     if (!adding.trim()) return;
     onAdd(adding);
@@ -183,7 +243,12 @@ function BoardCard({
   const empty = tasks.length === 0;
 
   return (
-    <div className="glass-strong rounded-2xl p-5">
+    <div
+      ref={setNodeRef}
+      className={`glass-strong rounded-2xl p-5 transition-colors ${
+        isOver && isDraggingTask ? "ring-2 ring-indigo-400 bg-indigo-500/10" : ""
+      }`}
+    >
       <div className="flex justify-between items-center mb-4">
         <div className="flex items-center gap-2">
           <div
@@ -207,12 +272,14 @@ function BoardCard({
           <div className="font-semibold uppercase text-xs tracking-wider text-amber-400">
             All clear
           </div>
-          <div className="text-xs text-zinc-400 mt-1">0 pending tasks</div>
+          <div className="text-xs text-zinc-400 mt-1">
+            {isDraggingTask ? "Drop here to move" : "0 pending tasks"}
+          </div>
         </div>
       ) : (
         <div className="space-y-2 max-h-72 overflow-y-auto">
           {tasks.slice(0, 8).map((t) => (
-            <TaskCard
+            <DraggableTaskCard
               key={t.id}
               task={t}
               onComplete={() => onComplete(t.id)}
@@ -242,7 +309,7 @@ function BoardCard({
   );
 }
 
-function TaskCard({
+function DraggableTaskCard({
   task,
   onComplete,
   onDelete,
@@ -250,6 +317,35 @@ function TaskCard({
   task: Task;
   onComplete: () => void;
   onDelete: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `task-${task.id}`,
+  });
+
+  return (
+    <div ref={setNodeRef} style={{ opacity: isDragging ? 0.4 : 1 }}>
+      <TaskCard
+        task={task}
+        onComplete={onComplete}
+        onDelete={onDelete}
+        dragHandleProps={{ ...attributes, ...listeners }}
+      />
+    </div>
+  );
+}
+
+function TaskCard({
+  task,
+  onComplete,
+  onDelete,
+  dragHandleProps,
+  dragging,
+}: {
+  task: Task;
+  onComplete: () => void;
+  onDelete: () => void;
+  dragHandleProps?: React.HTMLAttributes<HTMLButtonElement>;
+  dragging?: boolean;
 }) {
   const priorityClass =
     task.priority === "high"
@@ -259,25 +355,40 @@ function TaskCard({
       : "bg-blue-500/20 text-blue-300";
 
   return (
-    <div className="bg-white/5 rounded-lg p-3 hover:bg-white/8 group">
+    <div
+      className={`bg-white/5 rounded-lg p-3 hover:bg-white/8 group ${
+        dragging ? "shadow-2xl shadow-indigo-500/40 ring-2 ring-indigo-400" : ""
+      }`}
+    >
       <div className="flex justify-between items-start gap-2 mb-2">
+        {dragHandleProps && (
+          <button
+            {...dragHandleProps}
+            className="size-5 cursor-grab active:cursor-grabbing text-zinc-500 hover:text-zinc-300 flex items-center justify-center -ml-1"
+            title="Drag to another board"
+          >
+            <GripVertical className="size-3.5" />
+          </button>
+        )}
         <span className="font-semibold text-sm flex-1">{task.title}</span>
-        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            onClick={onComplete}
-            className="size-6 hover:bg-green-500/20 rounded flex items-center justify-center text-green-400"
-            title="Mark done"
-          >
-            <Check className="size-3" />
-          </button>
-          <button
-            onClick={onDelete}
-            className="size-6 hover:bg-red-500/20 rounded flex items-center justify-center text-red-400"
-            title="Delete"
-          >
-            <Trash2 className="size-3" />
-          </button>
-        </div>
+        {!dragging && (
+          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={onComplete}
+              className="size-6 hover:bg-green-500/20 rounded flex items-center justify-center text-green-400"
+              title="Mark done"
+            >
+              <Check className="size-3" />
+            </button>
+            <button
+              onClick={onDelete}
+              className="size-6 hover:bg-red-500/20 rounded flex items-center justify-center text-red-400"
+              title="Delete"
+            >
+              <Trash2 className="size-3" />
+            </button>
+          </div>
+        )}
       </div>
       <div className="flex gap-1 flex-wrap">
         <span className={`text-xs px-2 py-0.5 rounded-full ${priorityClass}`}>

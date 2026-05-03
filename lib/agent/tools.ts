@@ -424,6 +424,82 @@ const flagAvoidance: ToolDefinition = {
 };
 
 // ============================================================================
+// create_event — calendar event
+// ============================================================================
+const CreateEventInput = z.object({
+  title: z.string().min(1).max(280),
+  description: z.string().max(2000).optional(),
+  starts_at: z
+    .string()
+    .describe("ISO 8601 datetime when the event starts"),
+  ends_at: z
+    .string()
+    .describe("ISO 8601 datetime when the event ends. Defaults to 1h after start.")
+    .optional(),
+  all_day: z.boolean().default(false),
+  color: z.string().max(20).optional(),
+});
+
+const createEvent: ToolDefinition = {
+  schema: {
+    name: "create_event",
+    description:
+      "Create a calendar event. Use when the user mentions a meeting, appointment, or scheduled time-bound activity (not a reminder).",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        description: { type: "string" },
+        starts_at: { type: "string", description: "ISO 8601 datetime when event starts" },
+        ends_at: { type: "string", description: "ISO 8601 datetime when event ends (default: starts_at + 1h)" },
+        all_day: { type: "boolean", description: "True for all-day events" },
+        color: { type: "string", description: "Hex color, optional" },
+      },
+      required: ["title", "starts_at"],
+    },
+  },
+  async execute(rawInput, ctx) {
+    const parsed = CreateEventInput.safeParse(rawInput);
+    if (!parsed.success) {
+      return { ok: false, summary: `Invalid input: ${parsed.error.message}` };
+    }
+    const input = parsed.data;
+
+    const startsAt = new Date(input.starts_at);
+    const endsAt = input.ends_at
+      ? new Date(input.ends_at)
+      : new Date(startsAt.getTime() + 60 * 60 * 1000);
+
+    const { data, error } = await ctx.supabase
+      .from("calendar_events")
+      .insert({
+        user_id: ctx.userId,
+        title: input.title,
+        description: input.description ?? null,
+        starts_at: startsAt.toISOString(),
+        ends_at: endsAt.toISOString(),
+        all_day: input.all_day,
+        color: input.color ?? "#6366F1",
+        source: "local",
+      })
+      .select("id, title, starts_at")
+      .single();
+
+    if (error) return { ok: false, summary: `DB error: ${error.message}` };
+
+    const when = startsAt.toLocaleString("en-US", {
+      dateStyle: "medium",
+      timeStyle: input.all_day ? undefined : "short",
+    });
+    return {
+      ok: true,
+      summary: `Scheduled "${data.title}" for ${when}.`,
+      data: { event_id: data.id },
+    };
+  },
+};
+
+// ============================================================================
 // Registry
 // ============================================================================
 export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
@@ -432,6 +508,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   add_to_list: addToList,
   save_memory: saveMemory,
   flag_avoidance: flagAvoidance,
+  create_event: createEvent,
 };
 
 export const ALL_TOOLS: Anthropic.Tool[] = Object.values(TOOL_REGISTRY).map(

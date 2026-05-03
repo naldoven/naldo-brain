@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Bell, CheckSquare, ListChecks, Brain, AlertTriangle, Check } from "lucide-react";
+import { Bell, CheckSquare, ListChecks, Brain, AlertTriangle, Check, Calendar } from "lucide-react";
 import type { ComponentType } from "react";
 
 export type ToolCallRecord = {
@@ -54,6 +54,13 @@ const CHIP_META: Record<string, ChipMeta> = {
     bgClass: "bg-red-500/15 border-red-500/30",
     textClass: "text-red-300",
     href: "/avoidance",
+  },
+  create_event: {
+    label: "Event",
+    icon: Calendar,
+    bgClass: "bg-green-500/15 border-green-500/30",
+    textClass: "text-green-300",
+    href: "/calendar",
   },
 };
 
