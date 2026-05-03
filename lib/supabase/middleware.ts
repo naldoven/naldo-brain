@@ -35,6 +35,7 @@ export async function updateSession(request: NextRequest) {
   const isPublic =
     path === "/login" ||
     path.startsWith("/auth") ||
+    path.startsWith("/api/") ||  // API routes handle their own auth — never redirect them
     path.startsWith("/_next") ||
     path === "/manifest.webmanifest" ||
     path === "/favicon.ico";
