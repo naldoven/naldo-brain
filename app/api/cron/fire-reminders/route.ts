@@ -30,7 +30,17 @@ export async function POST(request: NextRequest) {
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !serviceKey) {
     return NextResponse.json(
-      { error: "supabase_not_configured" },
+      {
+        error: "supabase_not_configured",
+        missing: {
+          NEXT_PUBLIC_SUPABASE_URL: !supabaseUrl,
+          SUPABASE_SERVICE_ROLE_KEY: !serviceKey,
+        },
+        // List which SUPABASE_-prefixed env vars exist (names only, no values)
+        env_keys_present: Object.keys(process.env)
+          .filter((k) => k.startsWith("SUPABASE") || k.startsWith("NEXT_PUBLIC_SUPABASE"))
+          .sort(),
+      },
       { status: 503 }
     );
   }
