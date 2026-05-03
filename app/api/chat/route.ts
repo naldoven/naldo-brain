@@ -1,19 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@/lib/supabase/server";
-import { buildSystemPrompt } from "@/lib/prompts";
-import { ALL_TOOLS, executeToolByName } from "@/lib/agent/tools";
+import { runChatLoop, type Attachment } from "@/lib/agent/run-chat-loop";
 
 export const runtime = "nodejs";
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-const MODEL = "claude-sonnet-4-6";
-const MAX_TOOL_ITERATIONS = 5;
-
-type Attachment =
-  | { type: "image"; mediaType: string; data: string }
-  | { type: "url"; url: string };
 
 // GET /api/chat — fetch recent messages
 export async function GET() {
@@ -64,161 +53,65 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: insErr.message }, { status: 500 });
   }
 
-  // 2. Load recent conversation (last 20 messages) for context
-  const { data: recent } = await supabase
-    .from("chat_messages")
-    .select("role, content")
-    .eq("user_id", user.id)
-    .order("created_at", { ascending: false })
-    .limit(20);
+  // 2. Load history + memories + profile
+  const [{ data: recent }, { data: memories }, { data: profile }] =
+    await Promise.all([
+      supabase
+        .from("chat_messages")
+        .select("role, content")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(20),
+      supabase
+        .from("memories")
+        .select("subject, fact")
+        .eq("user_id", user.id)
+        .eq("active", true)
+        .limit(40),
+      supabase
+        .from("profiles")
+        .select("personality, timezone")
+        .eq("id", user.id)
+        .single(),
+    ]);
 
   const history = (recent ?? [])
     .reverse()
-    .filter((m) => m.role === "user" || m.role === "assistant");
+    .filter((m): m is { role: "user" | "assistant"; content: string } =>
+      m.role === "user" || m.role === "assistant"
+    );
 
-  // 3. Load active memories + profile
-  const [{ data: memories }, { data: profile }] = await Promise.all([
-    supabase
-      .from("memories")
-      .select("subject, fact")
-      .eq("user_id", user.id)
-      .eq("active", true)
-      .limit(40),
-    supabase
-      .from("profiles")
-      .select("personality, timezone")
-      .eq("id", user.id)
-      .single(),
-  ]);
-
-  const systemPrompt = buildSystemPrompt({
-    personality: profile?.personality ?? "straight-talking-coach",
-    memories: memories ?? [],
-    timezone: profile?.timezone ?? "America/New_York",
-  });
-
-  // 4. Build initial messages
-  const claudeMessages: Anthropic.MessageParam[] = history.slice(0, -1).map((m) => ({
-    role: m.role as "user" | "assistant",
-    content: m.content,
-  }));
-
-  // Latest user turn — include image blocks if attached
-  if (attachments.length > 0) {
-    const contentBlocks: Array<
-      | { type: "text"; text: string }
-      | {
-          type: "image";
-          source: {
-            type: "base64";
-            media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
-            data: string;
-          };
-        }
-    > = [];
-    for (const att of attachments) {
-      if (att.type === "image") {
-        const data = att.data.startsWith("data:")
-          ? att.data.substring(att.data.indexOf(",") + 1)
-          : att.data;
-        contentBlocks.push({
-          type: "image",
-          source: {
-            type: "base64",
-            media_type: att.mediaType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-            data,
-          },
-        });
-      }
-    }
-    contentBlocks.push({
-      type: "text",
-      text: userMessage || "What's in this image? Capture anything actionable.",
-    });
-    claudeMessages.push({ role: "user", content: contentBlocks });
-  } else {
-    claudeMessages.push({ role: "user", content: userMessage });
-  }
-
-  // 5. Tool-use loop
-  let assistantText = "";
-  const toolCallSummaries: string[] = [];
-
+  // 3. Run the agent loop
+  let result;
   try {
-    let iterations = 0;
-    while (iterations < MAX_TOOL_ITERATIONS) {
-      iterations++;
-
-      const response = await anthropic.messages.create({
-        model: MODEL,
-        max_tokens: 1024,
-        system: systemPrompt,
-        tools: ALL_TOOLS,
-        messages: claudeMessages,
-      });
-
-      // Append assistant response to message history
-      claudeMessages.push({
-        role: "assistant",
-        content: response.content,
-      });
-
-      // If stop_reason isn't tool_use, we're done — extract final text
-      if (response.stop_reason !== "tool_use") {
-        for (const block of response.content) {
-          if (block.type === "text") assistantText += block.text;
-        }
-        break;
-      }
-
-      // Otherwise execute each tool_use block and append results
-      const toolResults: Array<{
-        type: "tool_result";
-        tool_use_id: string;
-        content: string;
-      }> = [];
-
-      for (const block of response.content) {
-        if (block.type === "tool_use") {
-          const result = await executeToolByName(block.name, block.input, {
-            supabase,
-            userId: user.id,
-          });
-          toolCallSummaries.push(`${block.name}: ${result.summary}`);
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: JSON.stringify(result),
-          });
-        }
-      }
-
-      claudeMessages.push({ role: "user", content: toolResults });
-    }
-
-    // Safety: if we hit max iterations without resolution, surface that
-    if (!assistantText && iterations >= MAX_TOOL_ITERATIONS) {
-      assistantText = "(Reached max tool iterations — let me know if you need anything else.)";
-    }
+    result = await runChatLoop({
+      supabase,
+      userId: user.id,
+      userMessage,
+      attachments,
+      // Slice off the last entry — that's the user's current message we just persisted.
+      // The runChatLoop will re-add it as the latest turn.
+      history: history.slice(0, -1),
+      personality: profile?.personality ?? "straight-talking-coach",
+      timezone: profile?.timezone ?? "America/New_York",
+      memories: memories ?? [],
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Claude API error";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 
-  // 6. Persist assistant response
+  // 4. Persist assistant response
   await supabase.from("chat_messages").insert({
     user_id: user.id,
     role: "assistant",
-    content: assistantText,
+    content: result.text,
     channel: "web",
-    attachments:
-      toolCallSummaries.length > 0
-        ? [{ type: "tool_calls", calls: toolCallSummaries }]
-        : null,
+    attachments: result.toolCalls.length > 0 ? result.toolCalls : null,
   });
 
   return NextResponse.json({
-    message: assistantText,
-    tool_calls: toolCallSummaries,
+    message: result.text,
+    tool_calls: result.toolCalls,
   });
 }

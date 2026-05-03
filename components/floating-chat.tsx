@@ -4,11 +4,13 @@ import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { MessageCircle, X, Send, Mic, MicOff, Camera } from "lucide-react";
 import { toast } from "sonner";
+import { ToolCallChip, isToolCallArray, type ToolCallRecord } from "@/components/tool-call-chip";
 
 type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  attachments?: unknown;
   created_at: string;
 };
 
@@ -99,6 +101,7 @@ export function FloatingChat() {
           id: `assist-${Date.now()}`,
           role: "assistant",
           content: d.message,
+          attachments: Array.isArray(d.tool_calls) && d.tool_calls.length > 0 ? d.tool_calls : undefined,
           created_at: new Date().toISOString(),
         },
       ]);
@@ -224,32 +227,46 @@ export function FloatingChat() {
               </div>
             )}
 
-            {messages.map((m) => (
-              <div
-                key={m.id}
-                className={`flex gap-2 items-start ${m.role === "user" ? "justify-end" : ""}`}
-              >
-                {m.role === "assistant" && (
-                  <div className="brand-gradient size-7 rounded-full flex items-center justify-center text-white font-bold text-[10px]">
-                    B
-                  </div>
-                )}
+            {messages.map((m) => {
+              const toolCalls: ToolCallRecord[] = isToolCallArray(m.attachments)
+                ? (m.attachments as ToolCallRecord[])
+                : [];
+              return (
                 <div
-                  className={
-                    m.role === "user"
-                      ? "brand-gradient rounded-2xl rounded-tr-sm p-2.5 text-white text-xs max-w-[240px] whitespace-pre-wrap"
-                      : "glass rounded-2xl rounded-tl-sm p-2.5 text-xs max-w-[260px] whitespace-pre-wrap"
-                  }
+                  key={m.id}
+                  className={`flex gap-2 items-start ${m.role === "user" ? "justify-end" : ""}`}
                 >
-                  {m.content}
-                </div>
-                {m.role === "user" && (
-                  <div className="size-7 rounded-full bg-gradient-to-br from-amber-400 to-red-500 flex items-center justify-center font-bold text-[10px] text-white">
-                    N
+                  {m.role === "assistant" && (
+                    <div className="brand-gradient size-7 rounded-full flex items-center justify-center text-white font-bold text-[10px]">
+                      B
+                    </div>
+                  )}
+                  <div className={m.role === "user" ? "" : "flex-1 min-w-0 max-w-[260px]"}>
+                    <div
+                      className={
+                        m.role === "user"
+                          ? "brand-gradient rounded-2xl rounded-tr-sm p-2.5 text-white text-xs max-w-[240px] whitespace-pre-wrap"
+                          : "glass rounded-2xl rounded-tl-sm p-2.5 text-xs whitespace-pre-wrap"
+                      }
+                    >
+                      {m.content}
+                    </div>
+                    {toolCalls.length > 0 && (
+                      <div className="mt-1.5 space-y-1">
+                        {toolCalls.map((c, i) => (
+                          <ToolCallChip key={i} call={c} />
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            ))}
+                  {m.role === "user" && (
+                    <div className="size-7 rounded-full bg-gradient-to-br from-amber-400 to-red-500 flex items-center justify-center font-bold text-[10px] text-white">
+                      N
+                    </div>
+                  )}
+                </div>
+              );
+            })}
 
             {sending && (
               <div className="flex gap-2 items-start">

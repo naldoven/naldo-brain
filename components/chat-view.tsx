@@ -3,12 +3,14 @@
 import { useState, useRef, useEffect, FormEvent } from "react";
 import { Send, Mic, MicOff, Camera, Paperclip, Sparkles, X } from "lucide-react";
 import { toast } from "sonner";
+import { ToolCallChip, isToolCallArray, type ToolCallRecord } from "@/components/tool-call-chip";
 
 type ChatMessage = {
   id: string;
   role: string;
   content: string;
   channel?: string | null;
+  attachments?: unknown;
   created_at: string;
 };
 
@@ -120,6 +122,7 @@ export function ChatView({ initialMessages, recentCaptures, memories }: Props) {
         role: "assistant",
         content: data.message,
         channel: "web",
+        attachments: Array.isArray(data.tool_calls) && data.tool_calls.length > 0 ? data.tool_calls : undefined,
         created_at: new Date().toISOString(),
       };
       setMessages((m) => [...m, assistant]);
@@ -436,15 +439,26 @@ function MessageBubble({ message }: { message: ChatMessage }) {
     );
   }
 
+  const toolCalls: ToolCallRecord[] = isToolCallArray(message.attachments)
+    ? (message.attachments as ToolCallRecord[])
+    : [];
+
   return (
     <div className="flex gap-3 items-start">
       <div className="brand-gradient size-9 rounded-full flex items-center justify-center text-white text-xs font-bold">
         B
       </div>
-      <div className="max-w-2xl">
+      <div className="max-w-2xl flex-1">
         <div className="glass rounded-2xl rounded-tl-sm p-3 text-sm whitespace-pre-wrap">
           {message.content}
         </div>
+        {toolCalls.length > 0 && (
+          <div className="mt-2 space-y-1.5">
+            {toolCalls.map((c, i) => (
+              <ToolCallChip key={i} call={c} />
+            ))}
+          </div>
+        )}
         <div className="text-[10px] text-zinc-500 mt-1">
           {formatTime(message.created_at)}
         </div>

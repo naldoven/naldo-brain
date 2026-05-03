@@ -45,3 +45,20 @@ export async function sendWhatsAppMessage({
 export function isTwilioConfigured(): boolean {
   return Boolean(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN);
 }
+
+/**
+ * Validate Twilio webhook signature. Returns true if the request is authentic.
+ *
+ * @param signature  Value of the `X-Twilio-Signature` header
+ * @param url        The full HTTPS URL Twilio used (must match exactly — including any query string)
+ * @param params     The form-encoded params Twilio sent (the parsed form body)
+ */
+export function validateTwilioRequest(
+  signature: string,
+  url: string,
+  params: Record<string, string | string[]>
+): boolean {
+  if (!TWILIO_AUTH_TOKEN) return false;
+  if (!signature) return false;
+  return twilio.validateRequest(TWILIO_AUTH_TOKEN, signature, url, params);
+}
