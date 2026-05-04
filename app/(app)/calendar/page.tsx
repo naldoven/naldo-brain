@@ -7,10 +7,11 @@ export default async function CalendarPage() {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Pull events for a 3-month window centered on today
+  // Match the sync window in lib/google-calendar.ts (-30d / +365d) so every
+  // synced event is reachable when the user navigates months.
   const now = new Date();
-  const from = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString();
-  const to = new Date(now.getFullYear(), now.getMonth() + 2, 1).toISOString();
+  const from = new Date(now.getTime() - 30 * 86400000).toISOString();
+  const to = new Date(now.getTime() + 365 * 86400000).toISOString();
 
   const { data: events } = await supabase
     .from("calendar_events")

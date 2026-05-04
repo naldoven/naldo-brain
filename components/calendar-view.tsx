@@ -100,7 +100,7 @@ export function CalendarView({ initialEvents }: Props) {
           <h1 className="text-3xl font-bold flex items-center gap-2">
             <CalIcon className="size-7" /> Calendar
           </h1>
-          <p className="text-zinc-400">Local events for now. Google Calendar sync in a later phase.</p>
+          <p className="text-zinc-400">Synced with Google Calendar (green) + local events (indigo).</p>
         </div>
         <button
           onClick={() => setShowCreate({ defaultDate: now })}

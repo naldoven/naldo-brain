@@ -9,7 +9,13 @@ import { calendar as calendarApi, calendar_v3 } from "@googleapis/calendar";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const REDIRECT_PATH = "/api/auth/google/calendar/callback";
-const CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.events"];
+const CALENDAR_SCOPES = [
+  "https://www.googleapis.com/auth/calendar.events",      // read/write events on calendars I'm shown
+  "https://www.googleapis.com/auth/calendar.readonly",    // list all my calendars (work, shared, family)
+  "openid",
+  "email",
+  "profile",                                              // populates account_email on Integrations card
+];
 
 function getRedirectUri(origin: string): string {
   return `${origin.replace(/\/$/, "")}${REDIRECT_PATH}`;
@@ -194,12 +200,16 @@ type LocalEvent = {
   source: string;
 };
 
-const SYNC_WINDOW_DAYS_BACK = 7;
-const SYNC_WINDOW_DAYS_FWD = 60;
+const SYNC_WINDOW_DAYS_BACK = 30;
+const SYNC_WINDOW_DAYS_FWD = 365;
 
 /**
- * Pull recent + upcoming events from Google's primary calendar into local table.
- * Uses upsert keyed on (connection_id, external_id) so re-syncs are idempotent.
+ * Pull events from EVERY calendar the user has selected (primary + work +
+ * shared + family + holidays etc.) into the local table.
+ *
+ * Falls back to "primary"-only if calendarList.list fails (e.g., the user
+ * granted only the legacy `calendar.events` scope). Re-syncs are idempotent
+ * via the (connection_id, external_id) lookup.
  */
 export async function pullEvents(
   supabase: SupabaseClient,
@@ -219,6 +229,28 @@ export async function pullEvents(
 
   const cal = calendarApi({ version: "v3", auth });
 
+  // Discover all visible calendars. Falls back to ["primary"] if the user
+  // didn't grant calendar.readonly.
+  type CalMeta = { id: string; color: string };
+  let calendarsToSync: CalMeta[] = [{ id: "primary", color: "#10B981" }];
+  try {
+    const { data: calList } = await cal.calendarList.list();
+    const items = (calList.items ?? []).filter(
+      (c) => !c.deleted && c.selected !== false && c.id
+    );
+    if (items.length > 0) {
+      calendarsToSync = items.map((c) => ({
+        id: c.id!,
+        color: c.backgroundColor || "#10B981",
+      }));
+    }
+  } catch (err) {
+    console.warn(
+      "[google-calendar] calendarList.list failed; falling back to primary",
+      err instanceof Error ? err.message : err
+    );
+  }
+
   const now = new Date();
   const timeMin = new Date(
     now.getTime() - SYNC_WINDOW_DAYS_BACK * 24 * 60 * 60 * 1000
@@ -227,78 +259,100 @@ export async function pullEvents(
     now.getTime() + SYNC_WINDOW_DAYS_FWD * 24 * 60 * 60 * 1000
   ).toISOString();
 
-  let pageToken: string | undefined = undefined;
   let pulled = 0;
   let deleted = 0;
 
-  do {
-    const res: { data: calendar_v3.Schema$Events } = await cal.events.list({
-      calendarId: "primary",
-      timeMin,
-      timeMax,
-      singleEvents: true, // expand recurring instances
-      maxResults: 250,
-      orderBy: "startTime",
-      pageToken,
-    });
+  for (const calMeta of calendarsToSync) {
+    let pageToken: string | undefined = undefined;
+    do {
+      let res: { data: calendar_v3.Schema$Events };
+      try {
+        res = await cal.events.list({
+          calendarId: calMeta.id,
+          timeMin,
+          timeMax,
+          singleEvents: true, // expand recurring instances
+          maxResults: 250,
+          orderBy: "startTime",
+          pageToken,
+        });
+      } catch (err) {
+        // One bad calendar (e.g., a sub-calendar we lost access to) shouldn't
+        // sink the whole sync. Log and skip it.
+        console.warn(
+          "[google-calendar] events.list failed",
+          calMeta.id,
+          err instanceof Error ? err.message : err
+        );
+        break;
+      }
 
-    const items = res.data.items ?? [];
-    for (const e of items) {
-      if (!e.id) continue;
+      const items = res.data.items ?? [];
+      for (const e of items) {
+        if (!e.id) continue;
 
-      // Cancelled events: delete locally
-      if (e.status === "cancelled") {
-        const { error } = await supabase
+        // Cancelled events: delete locally
+        if (e.status === "cancelled") {
+          const { error } = await supabase
+            .from("calendar_events")
+            .delete()
+            .eq("user_id", userId)
+            .eq("connection_id", conn.id)
+            .eq("external_id", e.id);
+          if (!error) deleted++;
+          continue;
+        }
+
+        const allDay = Boolean(e.start?.date);
+        const startsAt = e.start?.dateTime ?? (e.start?.date ? `${e.start.date}T00:00:00Z` : null);
+        const endsAt = e.end?.dateTime ?? (e.end?.date ? `${e.end.date}T23:59:59Z` : null);
+        if (!startsAt) continue;
+
+        // Look up existing by (connection_id, external_id)
+        const { data: existing } = await supabase
           .from("calendar_events")
-          .delete()
+          .select("id")
           .eq("user_id", userId)
           .eq("connection_id", conn.id)
-          .eq("external_id", e.id);
-        if (!error) deleted++;
-        continue;
+          .eq("external_id", e.id)
+          .maybeSingle();
+
+        const payload = {
+          user_id: userId,
+          connection_id: conn.id,
+          external_id: e.id,
+          title: e.summary ?? "(no title)",
+          description: e.description ?? null,
+          starts_at: startsAt,
+          ends_at: endsAt,
+          all_day: allDay,
+          color: calMeta.color, // each calendar's own Google color
+          source: "google",
+          updated_at: new Date().toISOString(),
+        };
+
+        const { error: writeErr } = existing
+          ? await supabase
+              .from("calendar_events")
+              .update(payload)
+              .eq("id", existing.id)
+          : await supabase.from("calendar_events").insert(payload);
+        if (writeErr) {
+          // Don't count as pulled — surfaces failures instead of silently
+          // claiming success.
+          console.error("[google-calendar] write failed", {
+            calendar: calMeta.id,
+            external_id: e.id,
+            error: writeErr.message,
+          });
+          continue;
+        }
+        pulled++;
       }
 
-      const allDay = Boolean(e.start?.date);
-      const startsAt = e.start?.dateTime ?? (e.start?.date ? `${e.start.date}T00:00:00Z` : null);
-      const endsAt = e.end?.dateTime ?? (e.end?.date ? `${e.end.date}T23:59:59Z` : null);
-      if (!startsAt) continue;
-
-      // Look up existing by (connection_id, external_id)
-      const { data: existing } = await supabase
-        .from("calendar_events")
-        .select("id")
-        .eq("user_id", userId)
-        .eq("connection_id", conn.id)
-        .eq("external_id", e.id)
-        .maybeSingle();
-
-      const payload = {
-        user_id: userId,
-        connection_id: conn.id,
-        external_id: e.id,
-        title: e.summary ?? "(no title)",
-        description: e.description ?? null,
-        starts_at: startsAt,
-        ends_at: endsAt,
-        all_day: allDay,
-        color: "#10B981", // Google green for synced events
-        source: "google",
-        updated_at: new Date().toISOString(),
-      };
-
-      if (existing) {
-        await supabase
-          .from("calendar_events")
-          .update(payload)
-          .eq("id", existing.id);
-      } else {
-        await supabase.from("calendar_events").insert(payload);
-      }
-      pulled++;
-    }
-
-    pageToken = res.data.nextPageToken ?? undefined;
-  } while (pageToken);
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+  }
 
   // Update last_synced_at
   await supabase
