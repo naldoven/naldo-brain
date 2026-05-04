@@ -40,6 +40,140 @@ function startOfDayInTz(now: Date, tz: string): Date {
   return new Date(probe.getTime() - hourInTz * 60 * 60 * 1000);
 }
 
+/** YYYY-MM-DD in `tz` — used to bucket health metrics by Naldo's local day. */
+function dayKeyTz(iso: string, tz: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(iso));
+}
+
+type HealthRow = {
+  metric_type: string;
+  value: number;
+  unit: string | null;
+  recorded_at: string;
+};
+
+/**
+ * Boil ~14 days of raw health samples down to the snapshot the brief needs.
+ * Returns undefined when there's nothing — caller leaves `ctx.health` blank
+ * and the prompt skips the section entirely.
+ */
+function summarizeHealth(
+  rows: HealthRow[],
+  now: Date
+): BriefContext["health"] | undefined {
+  if (rows.length === 0) return undefined;
+
+  const today = dayKeyTz(now.toISOString(), TIMEZONE);
+  const buckets = new Map<string, Map<string, number[]>>(); // type → day → values
+  for (const r of rows) {
+    const day = dayKeyTz(r.recorded_at, TIMEZONE);
+    if (!buckets.has(r.metric_type)) buckets.set(r.metric_type, new Map());
+    const m = buckets.get(r.metric_type)!;
+    if (!m.has(day)) m.set(day, []);
+    m.get(day)!.push(r.value);
+  }
+
+  function lastNDayKeys(n: number): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const d = new Date(now.getTime() - i * 86400000);
+      out.push(dayKeyTz(d.toISOString(), TIMEZONE));
+    }
+    return out;
+  }
+
+  // Steps — sum per day
+  const stepsBuckets = buckets.get("steps");
+  const stepsToday = stepsBuckets?.get(today)?.reduce((s, v) => s + v, 0) ?? 0;
+  const stepsLast7 = lastNDayKeys(7).map(
+    (k) => stepsBuckets?.get(k)?.reduce((s, v) => s + v, 0) ?? 0
+  );
+  const stepsAvg7d =
+    stepsLast7.length > 0
+      ? stepsLast7.reduce((s, v) => s + v, 0) / stepsLast7.length
+      : 0;
+
+  // Sleep — last meaningful night, plus 7-day avg of nights with data
+  const sleepBuckets = buckets.get("sleep_hours");
+  let sleepLastNightHours: number | null = null;
+  for (const k of lastNDayKeys(7)) {
+    const vals = sleepBuckets?.get(k);
+    if (vals && vals.length > 0) {
+      sleepLastNightHours = Math.max(...vals);
+      break;
+    }
+  }
+  const sleepDays = lastNDayKeys(7)
+    .map((k) => sleepBuckets?.get(k))
+    .filter((v): v is number[] => !!v && v.length > 0)
+    .map((v) => Math.max(...v));
+  const sleepAvg7dHours =
+    sleepDays.length > 0
+      ? sleepDays.reduce((s, v) => s + v, 0) / sleepDays.length
+      : null;
+
+  // Weight — most recent + delta vs ~7 days ago (closest reading)
+  const weightRows = rows
+    .filter((r) => r.metric_type === "weight")
+    .sort((a, b) => b.recorded_at.localeCompare(a.recorded_at));
+  const weightLatest =
+    weightRows.length > 0
+      ? {
+          value: weightRows[0].value,
+          unit: weightRows[0].unit,
+          recorded_at: weightRows[0].recorded_at,
+        }
+      : null;
+  let weightDelta7d: number | null = null;
+  if (weightLatest) {
+    const target = now.getTime() - 7 * 86400000;
+    const ref = weightRows
+      .map((r) => ({
+        v: r.value,
+        diff: Math.abs(new Date(r.recorded_at).getTime() - target),
+      }))
+      .sort((a, b) => a.diff - b.diff)[0];
+    if (ref && ref.diff < 5 * 86400000) {
+      weightDelta7d = +(weightLatest.value - ref.v).toFixed(1);
+    }
+  }
+
+  // Workouts — count days with any workout_minutes > 0 in the last 7 days
+  const workoutBuckets = buckets.get("workout_minutes");
+  let workoutDays7d = 0;
+  let workoutMinutes7d = 0;
+  for (const k of lastNDayKeys(7)) {
+    const vals = workoutBuckets?.get(k);
+    if (vals && vals.length > 0) {
+      const sum = vals.reduce((s, v) => s + v, 0);
+      if (sum > 0) {
+        workoutDays7d++;
+        workoutMinutes7d += sum;
+      }
+    }
+  }
+
+  // Resting heart rate — most recent reading
+  const rhrRow = rows.find((r) => r.metric_type === "resting_heart_rate");
+
+  return {
+    weightLatest,
+    weightDelta7d,
+    stepsToday,
+    stepsAvg7d: Math.round(stepsAvg7d),
+    sleepLastNightHours,
+    sleepAvg7dHours: sleepAvg7dHours ? +sleepAvg7dHours.toFixed(1) : null,
+    workoutDays7d,
+    workoutMinutes7d: Math.round(workoutMinutes7d),
+    rhrLatest: rhrRow ? Math.round(rhrRow.value) : null,
+  };
+}
+
 /**
  * Extract long-term memories from the last 24h of user messages.
  * Called from EOD brief. Idempotent — skips facts already in memories.
@@ -144,6 +278,18 @@ export type BriefContext = {
   pendingReminders: number;
   recentCaptures: { title: string | null; source: string }[];
   recentMemories: { subject: string; fact: string }[];
+  // Health snapshot (Apple Health → /api/health/ingest). Empty when nothing synced yet.
+  health?: {
+    weightLatest: { value: number; unit: string | null; recorded_at: string } | null;
+    weightDelta7d: number | null;            // lbs change vs 7d-ago weight, null if missing
+    stepsToday: number;
+    stepsAvg7d: number;
+    sleepLastNightHours: number | null;
+    sleepAvg7dHours: number | null;
+    workoutDays7d: number;
+    workoutMinutes7d: number;
+    rhrLatest: number | null;
+  };
   // Window-specific data
   weekStats?: {
     tasksCompleted: number;
@@ -179,6 +325,7 @@ export async function gatherBriefContext(
     reminders,
     captures,
     memories,
+    health,
   ] = await Promise.all([
     supabase
       .from("tasks")
@@ -230,6 +377,14 @@ export async function gatherBriefContext(
       .eq("user_id", userId)
       .eq("active", true)
       .limit(20),
+    // Last 14 days of health metrics — enough for today vs 7-day-avg deltas.
+    supabase
+      .from("health_metrics")
+      .select("metric_type, value, unit, recorded_at")
+      .eq("user_id", userId)
+      .gte("recorded_at", new Date(now.getTime() - 14 * 86400000).toISOString())
+      .order("recorded_at", { ascending: false })
+      .limit(2000),
   ]);
 
   const ctx: BriefContext = {
@@ -249,6 +404,7 @@ export async function gatherBriefContext(
     pendingReminders: reminders.count ?? 0,
     recentCaptures: captures.data ?? [],
     recentMemories: memories.data ?? [],
+    health: summarizeHealth(health.data ?? [], now),
   };
 
   if (type === "weekly") {
@@ -420,6 +576,36 @@ function buildBriefUserPrompt(ctx: BriefContext, localTime: string): string {
     lines.push("", "AVOIDING (Avoidance Radar):");
     for (const a of ctx.flaggedAvoidance) {
       lines.push(`- ${a.title} (flagged ${a.days_flagged}d)`);
+    }
+  }
+
+  if (ctx.health) {
+    const h = ctx.health;
+    lines.push("", "HEALTH SNAPSHOT:");
+    if (h.weightLatest) {
+      const delta =
+        h.weightDelta7d === null
+          ? ""
+          : ` (${h.weightDelta7d > 0 ? "+" : ""}${h.weightDelta7d} vs 7d ago)`;
+      lines.push(
+        `- Weight: ${h.weightLatest.value.toFixed(1)} ${h.weightLatest.unit ?? "lbs"}${delta}`
+      );
+    }
+    lines.push(
+      `- Steps today: ${h.stepsToday.toLocaleString()} (7d avg ${h.stepsAvg7d.toLocaleString()})`
+    );
+    if (h.sleepLastNightHours !== null) {
+      const avg =
+        h.sleepAvg7dHours !== null ? ` (7d avg ${h.sleepAvg7dHours} hr)` : "";
+      lines.push(
+        `- Sleep last night: ${h.sleepLastNightHours.toFixed(1)} hr${avg}`
+      );
+    }
+    lines.push(
+      `- Workouts (7d): ${h.workoutDays7d} day${h.workoutDays7d === 1 ? "" : "s"}, ${h.workoutMinutes7d} min`
+    );
+    if (h.rhrLatest !== null) {
+      lines.push(`- Resting HR: ${h.rhrLatest} bpm`);
     }
   }
 
