@@ -3,7 +3,11 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getOAuthClient, persistTokens } from "@/lib/google-calendar";
+import {
+  getOAuthClient,
+  persistTokens,
+  getAppOrigin,
+} from "@/lib/google-calendar";
 
 export const runtime = "nodejs";
 
@@ -41,8 +45,8 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Exchange code for tokens
-  const oauth2 = getOAuthClient(request.nextUrl.origin);
+  // Exchange code for tokens — must use the SAME origin we sent in the auth request
+  const oauth2 = getOAuthClient(getAppOrigin());
   let tokens;
   try {
     const { tokens: t } = await oauth2.getToken(code);

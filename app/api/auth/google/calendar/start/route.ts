@@ -6,7 +6,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { randomBytes } from "node:crypto";
 import { createClient } from "@/lib/supabase/server";
-import { buildAuthorizeUrl } from "@/lib/google-calendar";
+import { buildAuthorizeUrl, getAppOrigin } from "@/lib/google-calendar";
 
 export const runtime = "nodejs";
 
@@ -20,7 +20,9 @@ export async function GET(request: NextRequest) {
   }
 
   const state = randomBytes(24).toString("hex");
-  const origin = request.nextUrl.origin;
+  // Use the public app URL — request.nextUrl.origin returns the internal
+  // localhost URL on Render (proxy strips the public host).
+  const origin = getAppOrigin();
 
   const authorizeUrl = buildAuthorizeUrl(state, origin);
 
