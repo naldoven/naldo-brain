@@ -11,6 +11,35 @@ import { NALDOS_GOALS } from "@/lib/prompts";
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = "claude-sonnet-4-6";
 
+// Naldo's local timezone. Render runs in UTC, so every "today" boundary and
+// event-time display has to be tz-aware or the briefings drift by 4h (EDT) / 5h (EST).
+const TIMEZONE = "America/New_York";
+
+/**
+ * Returns the UTC instant that equals 00:00 local-tz on the date `now` falls on
+ * in `tz`. e.g. now = 2026-05-04T10:30:00Z, tz = America/New_York →
+ * 2026-05-04T04:00:00Z (= midnight EDT). DST-safe within a day.
+ */
+function startOfDayInTz(now: Date, tz: string): Date {
+  const ymd = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+  // Probe at noon UTC of that date — guaranteed to land in the same tz day.
+  const probe = new Date(`${ymd}T12:00:00Z`);
+  const hourInTz = parseInt(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hour: "numeric",
+      hour12: false,
+    }).format(probe),
+    10
+  );
+  return new Date(probe.getTime() - hourInTz * 60 * 60 * 1000);
+}
+
 /**
  * Extract long-term memories from the last 24h of user messages.
  * Called from EOD brief. Idempotent — skips facts already in memories.
@@ -134,7 +163,10 @@ export async function gatherBriefContext(
   type: BriefType
 ): Promise<BriefContext> {
   const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  // Day boundaries in Naldo's local tz, NOT server UTC. Without this, the
+  // morning brief at 6:30am EDT (10:30 UTC) treats "today" as UTC, so events
+  // between 8pm–midnight EDT get dropped from today's events.
+  const startOfToday = startOfDayInTz(now, TIMEZONE);
   const endOfToday = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000);
   const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const oneMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -276,7 +308,7 @@ export async function gatherBriefContext(
 
 export async function generateBriefText(
   ctx: BriefContext,
-  timezone = "America/New_York"
+  timezone: string = TIMEZONE
 ): Promise<string> {
   const now = new Date();
   const localTime = now.toLocaleString("en-US", {
@@ -351,6 +383,7 @@ function buildBriefUserPrompt(ctx: BriefContext, localTime: string): string {
     lines.push("", "TODAY'S EVENTS:");
     for (const e of ctx.todaysEvents) {
       const t = new Date(e.starts_at).toLocaleTimeString("en-US", {
+        timeZone: TIMEZONE,
         hour: "numeric",
         minute: "2-digit",
       });
@@ -362,11 +395,17 @@ function buildBriefUserPrompt(ctx: BriefContext, localTime: string): string {
     lines.push("", "UPCOMING (next 7 days):");
     for (const e of ctx.upcomingEvents) {
       const d = new Date(e.starts_at).toLocaleDateString("en-US", {
+        timeZone: TIMEZONE,
         weekday: "short",
         month: "short",
         day: "numeric",
       });
-      lines.push(`- ${d}: ${e.title}`);
+      const t = new Date(e.starts_at).toLocaleTimeString("en-US", {
+        timeZone: TIMEZONE,
+        hour: "numeric",
+        minute: "2-digit",
+      });
+      lines.push(`- ${d} ${t}: ${e.title}`);
     }
   }
 
