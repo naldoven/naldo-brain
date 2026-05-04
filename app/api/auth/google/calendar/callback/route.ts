@@ -1,5 +1,8 @@
 /**
  * Google OAuth redirect lands here. Exchange code for tokens, persist, redirect to /integrations.
+ *
+ * IMPORTANT: All redirects must use getAppOrigin() — Render's request.url is the internal
+ * localhost URL which the browser can't follow.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
@@ -11,13 +14,17 @@ import {
 
 export const runtime = "nodejs";
 
+function publicRedirect(path: string): NextResponse {
+  return NextResponse.redirect(`${getAppOrigin().replace(/\/$/, "")}${path}`);
+}
+
 export async function GET(request: NextRequest) {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.redirect(new URL("/login", request.url));
+    return publicRedirect("/login");
   }
 
   const url = new URL(request.url);
@@ -26,23 +33,17 @@ export async function GET(request: NextRequest) {
   const error = url.searchParams.get("error");
 
   if (error) {
-    return NextResponse.redirect(
-      new URL(`/integrations?error=${encodeURIComponent(error)}`, request.url)
-    );
+    return publicRedirect(`/integrations?error=${encodeURIComponent(error)}`);
   }
 
   // CSRF check
   const expectedState = request.cookies.get("google_oauth_state")?.value;
   if (!state || !expectedState || state !== expectedState) {
-    return NextResponse.redirect(
-      new URL("/integrations?error=invalid_state", request.url)
-    );
+    return publicRedirect("/integrations?error=invalid_state");
   }
 
   if (!code) {
-    return NextResponse.redirect(
-      new URL("/integrations?error=missing_code", request.url)
-    );
+    return publicRedirect("/integrations?error=missing_code");
   }
 
   // Exchange code for tokens — must use the SAME origin we sent in the auth request
@@ -53,9 +54,7 @@ export async function GET(request: NextRequest) {
     tokens = t;
   } catch (err) {
     const msg = err instanceof Error ? err.message : "exchange_failed";
-    return NextResponse.redirect(
-      new URL(`/integrations?error=${encodeURIComponent(msg)}`, request.url)
-    );
+    return publicRedirect(`/integrations?error=${encodeURIComponent(msg)}`);
   }
 
   await persistTokens(supabase, user.id, {
@@ -65,9 +64,7 @@ export async function GET(request: NextRequest) {
     scope: tokens.scope,
   });
 
-  const response = NextResponse.redirect(
-    new URL("/integrations?connected=google_calendar", request.url)
-  );
+  const response = publicRedirect("/integrations?connected=google_calendar");
   response.cookies.delete("google_oauth_state");
   return response;
 }

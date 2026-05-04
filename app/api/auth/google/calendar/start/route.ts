@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    return NextResponse.redirect(new URL("/login", request.url));
+    return NextResponse.redirect(`${getAppOrigin().replace(/\/$/, "")}/login`);
   }
 
   const state = randomBytes(24).toString("hex");
