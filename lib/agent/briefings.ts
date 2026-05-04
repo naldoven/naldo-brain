@@ -11,6 +11,99 @@ import { NALDOS_GOALS } from "@/lib/prompts";
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = "claude-sonnet-4-6";
 
+/**
+ * Extract long-term memories from the last 24h of user messages.
+ * Called from EOD brief. Idempotent — skips facts already in memories.
+ */
+export async function extractAndSaveMemories(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<{ subject: string; fact: string }[]> {
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  const [{ data: messages }, { data: existing }] = await Promise.all([
+    supabase
+      .from("chat_messages")
+      .select("content, channel")
+      .eq("user_id", userId)
+      .eq("role", "user")
+      .gte("created_at", yesterday.toISOString())
+      .order("created_at"),
+    supabase
+      .from("memories")
+      .select("subject, fact")
+      .eq("user_id", userId)
+      .eq("active", true),
+  ]);
+
+  if (!messages || messages.length === 0) return [];
+
+  const existingList = (existing ?? [])
+    .map((m) => `- [${m.subject}] ${m.fact}`)
+    .join("\n");
+  const messagesList = messages
+    .map((m) => `[${m.channel ?? "?"}] ${m.content}`)
+    .join("\n");
+
+  const completion = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 800,
+    system: `You extract long-term factual memories from a user's chat messages. Long-term means: preferences, rules, biographical details, contact facts — things worth remembering across sessions.
+
+NOT memories: one-off tasks, reminders, ephemeral context, transient feelings, things that already exist in current memory.
+
+Output ONLY a JSON array. Each item: {"subject": "user" or a contact name, "fact": "the fact in one sentence"}.
+
+If nothing new is worth remembering, output [].`,
+    messages: [
+      {
+        role: "user",
+        content: `EXISTING MEMORIES (don't duplicate):\n${existingList || "(none yet)"}\n\nUSER MESSAGES (last 24h):\n${messagesList}\n\nExtract new memories as JSON array.`,
+      },
+    ],
+  });
+
+  const block = completion.content[0];
+  if (!block || block.type !== "text") return [];
+
+  // Parse JSON array — Claude may wrap it in prose
+  const match = block.text.match(/\[[\s\S]*\]/);
+  if (!match) return [];
+
+  let facts: unknown;
+  try {
+    facts = JSON.parse(match[0]);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(facts)) return [];
+
+  const inserted: { subject: string; fact: string }[] = [];
+  for (const f of facts) {
+    if (
+      !f ||
+      typeof f !== "object" ||
+      typeof (f as Record<string, unknown>).subject !== "string" ||
+      typeof (f as Record<string, unknown>).fact !== "string"
+    ) {
+      continue;
+    }
+    const subject = (f as { subject: string }).subject.trim();
+    const fact = (f as { fact: string }).fact.trim();
+    if (!subject || !fact) continue;
+
+    const { error } = await supabase.from("memories").insert({
+      user_id: userId,
+      subject,
+      fact,
+      active: true,
+    });
+    if (!error) inserted.push({ subject, fact });
+  }
+
+  return inserted;
+}
+
 export type BriefType = "morning" | "eod" | "weekly" | "monthly";
 
 export type BriefContext = {

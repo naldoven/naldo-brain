@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
+import { pushUpdate, pushDelete } from "@/lib/google-calendar";
 
 const PatchSchema = z.object({
   title: z.string().min(1).max(280).optional(),
@@ -35,6 +36,14 @@ export async function PATCH(
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Push update to Google if event has external_id (was originally synced)
+  try {
+    await pushUpdate(supabase, user.id, data);
+  } catch (err) {
+    console.warn("[calendar-events] Google push update failed:", err);
+  }
+
   return NextResponse.json({ event: data });
 }
 
@@ -49,6 +58,15 @@ export async function DELETE(
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const { id } = await params;
+
+  // Capture external_id BEFORE deleting locally so we can push delete to Google
+  const { data: existing } = await supabase
+    .from("calendar_events")
+    .select("external_id")
+    .eq("id", id)
+    .eq("user_id", user.id)
+    .maybeSingle();
+
   const { error } = await supabase
     .from("calendar_events")
     .delete()
@@ -56,5 +74,14 @@ export async function DELETE(
     .eq("user_id", user.id);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  if (existing?.external_id) {
+    try {
+      await pushDelete(supabase, user.id, existing.external_id);
+    } catch (err) {
+      console.warn("[calendar-events] Google push delete failed:", err);
+    }
+  }
+
   return NextResponse.json({ ok: true });
 }

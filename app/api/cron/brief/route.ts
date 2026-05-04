@@ -9,6 +9,7 @@ import { createServerClient } from "@supabase/ssr";
 import {
   gatherBriefContext,
   generateBriefText,
+  extractAndSaveMemories,
   type BriefType,
 } from "@/lib/agent/briefings";
 import { sendWhatsAppMessage, isTwilioConfigured } from "@/lib/twilio";
@@ -75,7 +76,25 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
-      const fullBody = `*${TYPE_PREFIXES[typeParam]}*\n\n${text}`;
+      // EOD: also auto-extract long-term memories from today's messages
+      let extractedMemories: { subject: string; fact: string }[] = [];
+      if (typeParam === "eod") {
+        try {
+          extractedMemories = await extractAndSaveMemories(supabase, p.id);
+        } catch (err) {
+          console.warn("[brief/eod] memory extraction failed:", err);
+        }
+      }
+
+      let fullBody = `*${TYPE_PREFIXES[typeParam]}*\n\n${text}`;
+
+      // Append extracted memories so user sees what was added
+      if (extractedMemories.length > 0) {
+        const memList = extractedMemories
+          .map((m) => `· [${m.subject}] ${m.fact}`)
+          .join("\n");
+        fullBody += `\n\n_🧠 New memories saved:_\n${memList}`;
+      }
 
       // Persist to chat_messages so it shows in the web chat too
       await supabase.from("chat_messages").insert({

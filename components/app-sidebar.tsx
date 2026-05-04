@@ -16,6 +16,7 @@ import {
   ListChecks,
   CheckSquare,
   Sparkles,
+  Plug,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -43,6 +44,7 @@ const dailyGroup: NavItem[] = [
   { href: "/calendar", label: "Calendar", icon: Calendar },
   { href: "/lists", label: "Lists", icon: ListChecks },
   { href: "/tasks", label: "Tasks", icon: CheckSquare },
+  { href: "/integrations", label: "Integrations", icon: Plug },
 ];
 
 type AppSidebarProps = {

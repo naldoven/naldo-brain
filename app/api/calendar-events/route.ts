@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
+import { pushCreate } from "@/lib/google-calendar";
 
 const CreateSchema = z.object({
   title: z.string().min(1).max(280),
@@ -70,5 +71,13 @@ export async function POST(request: NextRequest) {
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Push to Google Calendar if user is connected. Don't fail the request if push fails.
+  try {
+    await pushCreate(supabase, user.id, data);
+  } catch (err) {
+    console.warn("[calendar-events] Google push failed:", err);
+  }
+
   return NextResponse.json({ event: data });
 }
