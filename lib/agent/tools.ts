@@ -649,6 +649,605 @@ const createEvent: ToolDefinition = {
 };
 
 // ============================================================================
+// update_task — change status, board, priority, title, flagged
+// ============================================================================
+const UpdateTaskInput = z.object({
+  task_id: z.string().uuid().optional(),
+  query: z
+    .string()
+    .optional()
+    .describe("Fuzzy-match a task by title if no task_id given. Required if task_id missing."),
+  status: z
+    .enum(["queue", "this_week", "today", "in_progress", "done"])
+    .optional(),
+  priority: z.enum(["high", "medium", "low"]).optional(),
+  board_name: z.string().optional(),
+  flagged: z.boolean().optional(),
+  title: z.string().optional(),
+});
+
+const updateTask: ToolDefinition = {
+  schema: {
+    name: "update_task",
+    description:
+      "Update a task — mark done, change priority, move to a different board, rename, or toggle flagged. Find by task_id or fuzzy-match title via query.",
+    input_schema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string" },
+        query: { type: "string", description: "Title fragment if you don't have an ID" },
+        status: { type: "string", enum: ["queue", "this_week", "today", "in_progress", "done"] },
+        priority: { type: "string", enum: ["high", "medium", "low"] },
+        board_name: { type: "string", description: "Move to this board (fuzzy match)" },
+        flagged: { type: "boolean" },
+        title: { type: "string", description: "Rename the task" },
+      },
+    },
+  },
+  async execute(rawInput, ctx) {
+    const parsed = UpdateTaskInput.safeParse(rawInput);
+    if (!parsed.success) return { ok: false, summary: `Invalid input: ${parsed.error.message}` };
+    const input = parsed.data;
+
+    const taskId = await resolveTaskId(input.task_id, input.query, ctx);
+    if (!taskId.ok) return taskId;
+
+    const updates: Record<string, unknown> = {
+      last_touched_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    if (input.status !== undefined) {
+      updates.status = input.status;
+      if (input.status === "done") {
+        updates.completed_at = new Date().toISOString();
+        updates.flagged = false;
+      }
+    }
+    if (input.priority !== undefined) updates.priority = input.priority;
+    if (input.flagged !== undefined) {
+      updates.flagged = input.flagged;
+      if (input.flagged) updates.flagged_at = new Date().toISOString();
+    }
+    if (input.title !== undefined) updates.title = input.title;
+
+    if (input.board_name !== undefined) {
+      const boardId = await resolveBoardId(input.board_name, ctx);
+      if (boardId) updates.board_id = boardId;
+    }
+
+    const { data, error } = await ctx.supabase
+      .from("tasks")
+      .update(updates)
+      .eq("id", taskId.id)
+      .eq("user_id", ctx.userId)
+      .select("title, status, priority")
+      .single();
+
+    if (error) return { ok: false, summary: `DB error: ${error.message}` };
+
+    return {
+      ok: true,
+      summary: `Updated task "${data.title}" (status: ${data.status}, priority: ${data.priority}).`,
+      data: { task_id: taskId.id },
+    };
+  },
+};
+
+async function resolveTaskId(
+  taskId: string | undefined,
+  query: string | undefined,
+  ctx: ToolContext
+): Promise<{ ok: true; id: string } | { ok: false; summary: string }> {
+  if (taskId) return { ok: true, id: taskId };
+  if (!query) return { ok: false, summary: "Provide either task_id or query." };
+
+  const { data } = await ctx.supabase
+    .from("tasks")
+    .select("id, title")
+    .eq("user_id", ctx.userId)
+    .neq("status", "done")
+    .ilike("title", `%${query}%`)
+    .limit(5);
+
+  if (!data || data.length === 0) return { ok: false, summary: `No active task matches "${query}".` };
+  if (data.length > 1) {
+    const titles = data.map((t) => `"${t.title}"`).join(", ");
+    return {
+      ok: false,
+      summary: `Multiple tasks match "${query}": ${titles}. Be more specific.`,
+    };
+  }
+  return { ok: true, id: data[0].id };
+}
+
+async function resolveBoardId(name: string, ctx: ToolContext): Promise<string | null> {
+  const { data } = await ctx.supabase
+    .from("boards")
+    .select("id, name")
+    .eq("user_id", ctx.userId);
+
+  if (!data) return null;
+  const target = name.toLowerCase();
+  const exact = data.find((b) => b.name.toLowerCase() === target);
+  if (exact) return exact.id;
+  const partial = data.find(
+    (b) => b.name.toLowerCase().includes(target) || target.includes(b.name.toLowerCase())
+  );
+  return partial?.id ?? null;
+}
+
+// ============================================================================
+// update_event — reschedule, rename, change details of a calendar event
+// ============================================================================
+const UpdateEventInput = z.object({
+  event_id: z.string().uuid().optional(),
+  query: z.string().optional().describe("Fuzzy-match by title if no event_id given"),
+  starts_at: z.string().optional().describe("New ISO 8601 start datetime"),
+  ends_at: z.string().optional().describe("New ISO 8601 end datetime"),
+  title: z.string().optional(),
+  description: z.string().optional(),
+  all_day: z.boolean().optional(),
+});
+
+const updateEvent: ToolDefinition = {
+  schema: {
+    name: "update_event",
+    description:
+      "Update a calendar event — reschedule, rename, change duration. Find by event_id or fuzzy-match title via query.",
+    input_schema: {
+      type: "object",
+      properties: {
+        event_id: { type: "string" },
+        query: { type: "string", description: "Title fragment if no ID" },
+        starts_at: { type: "string", description: "ISO 8601 datetime" },
+        ends_at: { type: "string" },
+        title: { type: "string" },
+        description: { type: "string" },
+        all_day: { type: "boolean" },
+      },
+    },
+  },
+  async execute(rawInput, ctx) {
+    const parsed = UpdateEventInput.safeParse(rawInput);
+    if (!parsed.success) return { ok: false, summary: `Invalid input: ${parsed.error.message}` };
+    const input = parsed.data;
+
+    const eventId = await resolveEventId(input.event_id, input.query, ctx);
+    if (!eventId.ok) return eventId;
+
+    const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (input.starts_at !== undefined) updates.starts_at = input.starts_at;
+    if (input.ends_at !== undefined) updates.ends_at = input.ends_at;
+    if (input.title !== undefined) updates.title = input.title;
+    if (input.description !== undefined) updates.description = input.description;
+    if (input.all_day !== undefined) updates.all_day = input.all_day;
+
+    const { data, error } = await ctx.supabase
+      .from("calendar_events")
+      .update(updates)
+      .eq("id", eventId.id)
+      .eq("user_id", ctx.userId)
+      .select("title, starts_at")
+      .single();
+
+    if (error) return { ok: false, summary: `DB error: ${error.message}` };
+
+    const when = new Date(data.starts_at).toLocaleString("en-US", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+    return { ok: true, summary: `Updated "${data.title}" → ${when}.` };
+  },
+};
+
+async function resolveEventId(
+  eventId: string | undefined,
+  query: string | undefined,
+  ctx: ToolContext
+): Promise<{ ok: true; id: string } | { ok: false; summary: string }> {
+  if (eventId) return { ok: true, id: eventId };
+  if (!query) return { ok: false, summary: "Provide event_id or query." };
+
+  const now = new Date();
+  // Look at upcoming events first (next 30 days)
+  const future = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  const { data } = await ctx.supabase
+    .from("calendar_events")
+    .select("id, title")
+    .eq("user_id", ctx.userId)
+    .gte("starts_at", now.toISOString())
+    .lte("starts_at", future)
+    .ilike("title", `%${query}%`)
+    .limit(5);
+
+  if (!data || data.length === 0) return { ok: false, summary: `No upcoming event matches "${query}".` };
+  if (data.length > 1) {
+    return {
+      ok: false,
+      summary: `Multiple events match: ${data.map((e) => `"${e.title}"`).join(", ")}. Be more specific.`,
+    };
+  }
+  return { ok: true, id: data[0].id };
+}
+
+// ============================================================================
+// complete_list_item — check off a list item
+// ============================================================================
+const CompleteListItemInput = z.object({
+  list_name: z
+    .string()
+    .describe("Which list to look in (e.g. 'Shopping'). Falls back to checking all lists."),
+  text: z.string().describe("The item text or fragment to match (e.g. 'milk', 'bread')."),
+  uncheck: z.boolean().default(false).describe("Set true to uncheck instead of complete."),
+});
+
+const completeListItem: ToolDefinition = {
+  schema: {
+    name: "complete_list_item",
+    description:
+      "Check off (or uncheck) an item on a list. Use when the user says 'I bought milk', 'cross off bread', 'done with eggs', etc.",
+    input_schema: {
+      type: "object",
+      properties: {
+        list_name: { type: "string", description: "Which list (fuzzy match). Optional if item is unique." },
+        text: { type: "string", description: "Item text fragment to match" },
+        uncheck: { type: "boolean", description: "Default false. Set true to mark as not-done." },
+      },
+      required: ["list_name", "text"],
+    },
+  },
+  async execute(rawInput, ctx) {
+    const parsed = CompleteListItemInput.safeParse(rawInput);
+    if (!parsed.success) return { ok: false, summary: `Invalid input: ${parsed.error.message}` };
+    const input = parsed.data;
+
+    // Find the list (fuzzy)
+    const { data: lists } = await ctx.supabase
+      .from("lists")
+      .select("id, name")
+      .eq("user_id", ctx.userId)
+      .ilike("name", `%${input.list_name}%`)
+      .limit(3);
+
+    if (!lists || lists.length === 0) {
+      return { ok: false, summary: `No list matches "${input.list_name}".` };
+    }
+    if (lists.length > 1) {
+      return {
+        ok: false,
+        summary: `Multiple lists match "${input.list_name}": ${lists.map((l) => l.name).join(", ")}. Be more specific.`,
+      };
+    }
+    const listId = lists[0].id;
+
+    // Find the item
+    const { data: items } = await ctx.supabase
+      .from("list_items")
+      .select("id, text, completed")
+      .eq("list_id", listId)
+      .eq("user_id", ctx.userId)
+      .ilike("text", `%${input.text}%`)
+      .limit(5);
+
+    if (!items || items.length === 0) {
+      return { ok: false, summary: `No item matches "${input.text}" in ${lists[0].name}.` };
+    }
+    if (items.length > 1) {
+      return {
+        ok: false,
+        summary: `Multiple items match: ${items.map((i) => `"${i.text}"`).join(", ")}. Be more specific.`,
+      };
+    }
+
+    const item = items[0];
+    const completed = !input.uncheck;
+    const { error } = await ctx.supabase
+      .from("list_items")
+      .update({
+        completed,
+        completed_at: completed ? new Date().toISOString() : null,
+      })
+      .eq("id", item.id)
+      .eq("user_id", ctx.userId);
+
+    if (error) return { ok: false, summary: `DB error: ${error.message}` };
+
+    return {
+      ok: true,
+      summary: completed
+        ? `✓ Crossed off "${item.text}" from ${lists[0].name}.`
+        : `Unchecked "${item.text}" on ${lists[0].name}.`,
+    };
+  },
+};
+
+// ============================================================================
+// delete_* tools (reminder, task, list, list_item, event)
+// ============================================================================
+const DeleteInput = z.object({
+  id: z.string().uuid().optional(),
+  query: z.string().optional().describe("Fuzzy-match by title/text"),
+});
+
+function makeDeleter(
+  name: string,
+  table: string,
+  titleField: string,
+  description: string
+): ToolDefinition {
+  return {
+    schema: {
+      name,
+      description,
+      input_schema: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          query: { type: "string", description: `Fuzzy match on ${titleField}` },
+        },
+      },
+    },
+    async execute(rawInput, ctx) {
+      const parsed = DeleteInput.safeParse(rawInput);
+      if (!parsed.success) return { ok: false, summary: `Invalid input: ${parsed.error.message}` };
+      const input = parsed.data;
+
+      let id = input.id;
+      let label = "(unknown)";
+
+      if (!id) {
+        if (!input.query) return { ok: false, summary: "Provide id or query." };
+        const { data } = await ctx.supabase
+          .from(table)
+          .select(`id, ${titleField}`)
+          .eq("user_id", ctx.userId)
+          .ilike(titleField, `%${input.query}%`)
+          .limit(5);
+        if (!data || data.length === 0) {
+          return { ok: false, summary: `No match for "${input.query}".` };
+        }
+        if (data.length > 1) {
+          const labels = data
+            .map((row) => `"${(row as unknown as Record<string, string>)[titleField]}"`)
+            .join(", ");
+          return {
+            ok: false,
+            summary: `Multiple matches: ${labels}. Be more specific.`,
+          };
+        }
+        id = (data[0] as unknown as Record<string, string>).id;
+        label = (data[0] as unknown as Record<string, string>)[titleField];
+      }
+
+      const { error } = await ctx.supabase
+        .from(table)
+        .delete()
+        .eq("id", id)
+        .eq("user_id", ctx.userId);
+
+      if (error) return { ok: false, summary: `DB error: ${error.message}` };
+      return { ok: true, summary: `Deleted ${name.replace("delete_", "")}: "${label}".` };
+    },
+  };
+}
+
+const deleteReminder = makeDeleter(
+  "delete_reminder",
+  "reminders",
+  "title",
+  "Delete a reminder. Find by id or fuzzy-match title via query."
+);
+const deleteTaskTool = makeDeleter(
+  "delete_task",
+  "tasks",
+  "title",
+  "Delete a task. Find by id or fuzzy-match title via query."
+);
+const deleteList = makeDeleter(
+  "delete_list",
+  "lists",
+  "name",
+  "Delete a list (and all its items). Find by id or fuzzy-match name."
+);
+const deleteEvent = makeDeleter(
+  "delete_event",
+  "calendar_events",
+  "title",
+  "Delete a calendar event. Find by id or fuzzy-match title via query."
+);
+
+// ============================================================================
+// query_metric — answer questions about your data
+// ============================================================================
+const QueryMetricInput = z.object({
+  metric: z.enum([
+    "todays_tasks",
+    "pending_reminders",
+    "recurring_reminders",
+    "flagged_items",
+    "active_lists",
+    "todays_events",
+    "this_week_events",
+    "recent_captures",
+    "memories_count",
+    // Phases 3-5 will add these:
+    "revenue_ytd",
+    "close_rate",
+    "cash_runway",
+    "net_worth",
+    "sleep_avg_7d",
+    "gym_streak",
+  ]),
+});
+
+const queryMetric: ToolDefinition = {
+  schema: {
+    name: "query_metric",
+    description:
+      "Look up a current metric value. Use when the user asks 'what's my X?' (e.g. 'how many tasks today?', 'what's pending?'). Some metrics (revenue, close rate, cash runway, sleep avg) require Phases 3-5 integrations and will return 'not connected yet'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        metric: {
+          type: "string",
+          enum: [
+            "todays_tasks",
+            "pending_reminders",
+            "recurring_reminders",
+            "flagged_items",
+            "active_lists",
+            "todays_events",
+            "this_week_events",
+            "recent_captures",
+            "memories_count",
+            "revenue_ytd",
+            "close_rate",
+            "cash_runway",
+            "net_worth",
+            "sleep_avg_7d",
+            "gym_streak",
+          ],
+        },
+      },
+      required: ["metric"],
+    },
+  },
+  async execute(rawInput, ctx) {
+    const parsed = QueryMetricInput.safeParse(rawInput);
+    if (!parsed.success) return { ok: false, summary: `Invalid input: ${parsed.error.message}` };
+    const m = parsed.data.metric;
+
+    // Phases 3-5 placeholders
+    if (
+      m === "revenue_ytd" ||
+      m === "close_rate" ||
+      m === "cash_runway" ||
+      m === "net_worth" ||
+      m === "sleep_avg_7d" ||
+      m === "gym_streak"
+    ) {
+      const phase =
+        m === "revenue_ytd" || m === "close_rate"
+          ? "Phase 3 (Business / GoHighLevel)"
+          : m === "cash_runway" || m === "net_worth"
+          ? "Phase 4 (Finance / Plaid)"
+          : "Phase 5 (Health / Apple Health)";
+      return {
+        ok: true,
+        summary: `${m} not connected yet — needs ${phase}.`,
+        data: { metric: m, value: null, status: "not_connected" },
+      };
+    }
+
+    // Real queries on current data
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const endOfToday = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000);
+    const inSevenDays = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+    if (m === "todays_tasks") {
+      const { count } = await ctx.supabase
+        .from("tasks")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", ctx.userId)
+        .eq("status", "today");
+      return { ok: true, summary: `${count ?? 0} task${count === 1 ? "" : "s"} marked Today.` };
+    }
+    if (m === "pending_reminders") {
+      const { count } = await ctx.supabase
+        .from("reminders")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", ctx.userId)
+        .eq("status", "active");
+      return { ok: true, summary: `${count ?? 0} active reminder${count === 1 ? "" : "s"}.` };
+    }
+    if (m === "recurring_reminders") {
+      const { count } = await ctx.supabase
+        .from("reminders")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", ctx.userId)
+        .eq("status", "active")
+        .not("rrule", "is", null);
+      return { ok: true, summary: `${count ?? 0} recurring reminder${count === 1 ? "" : "s"}.` };
+    }
+    if (m === "flagged_items") {
+      const [{ count: flaggedTasks }, { count: flaggedAvoidance }] = await Promise.all([
+        ctx.supabase
+          .from("tasks")
+          .select("*", { count: "exact", head: true })
+          .eq("user_id", ctx.userId)
+          .eq("flagged", true),
+        ctx.supabase
+          .from("avoidance_items")
+          .select("*", { count: "exact", head: true })
+          .eq("user_id", ctx.userId)
+          .eq("flagged", true)
+          .eq("completed", false),
+      ]);
+      const total = (flaggedTasks ?? 0) + (flaggedAvoidance ?? 0);
+      return {
+        ok: true,
+        summary: `${total} flagged item${total === 1 ? "" : "s"} (${flaggedTasks ?? 0} task${flaggedTasks === 1 ? "" : "s"} + ${flaggedAvoidance ?? 0} avoidance).`,
+      };
+    }
+    if (m === "active_lists") {
+      const { count } = await ctx.supabase
+        .from("lists")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", ctx.userId)
+        .eq("archived", false);
+      return { ok: true, summary: `${count ?? 0} active list${count === 1 ? "" : "s"}.` };
+    }
+    if (m === "todays_events") {
+      const { data } = await ctx.supabase
+        .from("calendar_events")
+        .select("title, starts_at")
+        .eq("user_id", ctx.userId)
+        .gte("starts_at", startOfToday.toISOString())
+        .lt("starts_at", endOfToday.toISOString())
+        .order("starts_at");
+      const events = data ?? [];
+      const summary =
+        events.length === 0
+          ? "No events today."
+          : `${events.length} event${events.length === 1 ? "" : "s"} today: ${events
+              .map((e) => `${e.title} (${new Date(e.starts_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })})`)
+              .join(", ")}.`;
+      return { ok: true, summary };
+    }
+    if (m === "this_week_events") {
+      const { count } = await ctx.supabase
+        .from("calendar_events")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", ctx.userId)
+        .gte("starts_at", now.toISOString())
+        .lt("starts_at", inSevenDays.toISOString());
+      return { ok: true, summary: `${count ?? 0} event${count === 1 ? "" : "s"} in the next 7 days.` };
+    }
+    if (m === "recent_captures") {
+      const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const { count } = await ctx.supabase
+        .from("captures")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", ctx.userId)
+        .gte("created_at", yesterday.toISOString());
+      return { ok: true, summary: `${count ?? 0} capture${count === 1 ? "" : "s"} in the last 24h.` };
+    }
+    if (m === "memories_count") {
+      const { count } = await ctx.supabase
+        .from("memories")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", ctx.userId)
+        .eq("active", true);
+      return { ok: true, summary: `${count ?? 0} long-term memor${count === 1 ? "y" : "ies"} stored.` };
+    }
+
+    return { ok: false, summary: "Unknown metric." };
+  },
+};
+
+// ============================================================================
 // Registry
 // ============================================================================
 export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
@@ -659,6 +1258,14 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   flag_avoidance: flagAvoidance,
   create_event: createEvent,
   update_reminder: updateReminder,
+  update_task: updateTask,
+  update_event: updateEvent,
+  complete_list_item: completeListItem,
+  delete_reminder: deleteReminder,
+  delete_task: deleteTaskTool,
+  delete_list: deleteList,
+  delete_event: deleteEvent,
+  query_metric: queryMetric,
 };
 
 export const ALL_TOOLS: Anthropic.Tool[] = Object.values(TOOL_REGISTRY).map(
