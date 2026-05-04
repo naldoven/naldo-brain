@@ -40,7 +40,9 @@ export function buildAuthorizeUrl(state: string, origin?: string): string {
   const oauth2 = getOAuthClient(origin);
   return oauth2.generateAuthUrl({
     access_type: "offline",
-    prompt: "consent",
+    // "select_account" forces the account picker every time — fixes auto-login to wrong account
+    // "consent" guarantees a refresh_token is issued
+    prompt: "select_account consent",
     scope: CALENDAR_SCOPES,
     state,
   });
