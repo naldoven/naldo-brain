@@ -424,6 +424,155 @@ const flagAvoidance: ToolDefinition = {
 };
 
 // ============================================================================
+// update_reminder — ack done or snooze (called when user replies to a fired reminder)
+// ============================================================================
+const UpdateReminderInput = z.object({
+  action: z.enum(["complete", "snooze"]),
+  reminder_id: z
+    .string()
+    .uuid()
+    .optional()
+    .describe(
+      "Specific reminder UUID. Omit to default to the most recently fired unacked reminder."
+    ),
+  snooze_minutes: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      "Required when action is 'snooze'. 60 = 1 hour, 1440 = tomorrow (24h), 30 = 30 min, etc."
+    ),
+});
+
+const updateReminder: ToolDefinition = {
+  schema: {
+    name: "update_reminder",
+    description:
+      "Acknowledge a fired reminder. Use when the user replies 'done', 'completed', 'did it', '1h', 'in an hour', 'tomorrow', etc. — typically right after receiving a reminder. Defaults to the most recently fired unacked reminder if no ID given.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["complete", "snooze"],
+          description: "'complete' to mark done, 'snooze' to push to a later time",
+        },
+        reminder_id: {
+          type: "string",
+          description: "Specific reminder UUID. Omit for the most recent unacked.",
+        },
+        snooze_minutes: {
+          type: "number",
+          description:
+            "Required for snooze. Common: 30 (30min), 60 (1h), 120 (2h), 1440 (tomorrow same time).",
+        },
+      },
+      required: ["action"],
+    },
+  },
+  async execute(rawInput, ctx) {
+    const parsed = UpdateReminderInput.safeParse(rawInput);
+    if (!parsed.success) {
+      return { ok: false, summary: `Invalid input: ${parsed.error.message}` };
+    }
+    const input = parsed.data;
+
+    // Resolve reminder_id — default to most recently fired unacked
+    let reminderId = input.reminder_id;
+    if (!reminderId) {
+      const { data } = await ctx.supabase
+        .from("reminders")
+        .select("id, title, last_fired_at, acked_at")
+        .eq("user_id", ctx.userId)
+        .not("last_fired_at", "is", null)
+        .order("last_fired_at", { ascending: false })
+        .limit(5);
+
+      const unacked = (data ?? []).find((r) => {
+        if (!r.last_fired_at) return false;
+        if (!r.acked_at) return true;
+        return new Date(r.acked_at) < new Date(r.last_fired_at);
+      });
+
+      if (!unacked) {
+        return {
+          ok: false,
+          summary: "No recently fired reminder to update.",
+        };
+      }
+      reminderId = unacked.id;
+    }
+
+    // Fetch the reminder to know if it's recurring + capture title for response
+    const { data: reminder, error: fetchErr } = await ctx.supabase
+      .from("reminders")
+      .select("id, title, rrule, status")
+      .eq("id", reminderId)
+      .eq("user_id", ctx.userId)
+      .single();
+
+    if (fetchErr || !reminder) {
+      return { ok: false, summary: `Reminder not found: ${fetchErr?.message ?? "no match"}` };
+    }
+
+    const now = new Date();
+
+    if (input.action === "complete") {
+      const updates: Record<string, unknown> = {
+        acked_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      };
+      // Non-recurring → mark fully completed so cron stops firing it
+      if (!reminder.rrule) {
+        updates.status = "completed";
+      }
+
+      const { error } = await ctx.supabase
+        .from("reminders")
+        .update(updates)
+        .eq("id", reminderId)
+        .eq("user_id", ctx.userId);
+      if (error) return { ok: false, summary: `DB error: ${error.message}` };
+
+      return {
+        ok: true,
+        summary: reminder.rrule
+          ? `Acked "${reminder.title}" — recurring schedule continues.`
+          : `Marked "${reminder.title}" complete.`,
+        data: { reminder_id: reminderId, action: "complete" },
+      };
+    }
+
+    // SNOOZE
+    const minutes = input.snooze_minutes ?? 60;
+    const newFireAt = new Date(now.getTime() + minutes * 60 * 1000);
+
+    const { error } = await ctx.supabase
+      .from("reminders")
+      .update({
+        fire_at: newFireAt.toISOString(),
+        acked_at: now.toISOString(),
+        status: "active",
+        updated_at: now.toISOString(),
+      })
+      .eq("id", reminderId)
+      .eq("user_id", ctx.userId);
+    if (error) return { ok: false, summary: `DB error: ${error.message}` };
+
+    const friendlyTime = newFireAt.toLocaleString("en-US", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+    return {
+      ok: true,
+      summary: `Snoozed "${reminder.title}" → ${friendlyTime}.`,
+      data: { reminder_id: reminderId, action: "snooze", new_fire_at: newFireAt.toISOString() },
+    };
+  },
+};
+
+// ============================================================================
 // create_event — calendar event
 // ============================================================================
 const CreateEventInput = z.object({
@@ -509,6 +658,7 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   save_memory: saveMemory,
   flag_avoidance: flagAvoidance,
   create_event: createEvent,
+  update_reminder: updateReminder,
 };
 
 export const ALL_TOOLS: Anthropic.Tool[] = Object.values(TOOL_REGISTRY).map(

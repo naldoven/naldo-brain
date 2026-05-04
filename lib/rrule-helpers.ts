@@ -49,6 +49,7 @@ function formatRRuleDate(d: Date): string {
 
 /**
  * Format a Reminder for delivery via WhatsApp.
+ * Appends a reply hint so user can reply "done", "1h", or "tomorrow" to ack/snooze.
  */
 export function formatReminderMessage(r: {
   title: string;
@@ -58,5 +59,6 @@ export function formatReminderMessage(r: {
   const emoji = r.emoji ?? "🔔";
   let body = `${emoji} ${r.title}`;
   if (r.description) body += `\n${r.description}`;
+  body += `\n\n_Reply: *done* · *1h* · *tomorrow*_`;
   return body;
 }
