@@ -122,9 +122,11 @@ export async function fetchAllOpportunities(
   let nextUrl: string | null = null;
 
   for (let page = 0; page < 50; page++) {
+    // GHL v2 uses `limit` (max 100), not `pageLimit` — the schema validator
+    // rejects unknown fields with a 422.
     const body: Record<string, unknown> = {
       locationId,
-      pageLimit: pageSize,
+      limit: pageSize,
     };
     if (options.updatedSince) body.date = options.updatedSince;
     if (startAfter) body.startAfter = startAfter;
