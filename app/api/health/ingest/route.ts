@@ -1,34 +1,18 @@
 /**
- * Apple Health ingest endpoint.
+ * Native ingest endpoint — accepts the schema we control.
  *
- * Hit by an iOS Shortcut on Naldo's iPhone with the x-health-secret header.
- * Body shape:
- *   { metrics: [
- *       { type: "steps", value: 8234, unit: "count", recorded_at: "2026-05-04T08:00:00-04:00", ended_at?: ..., metadata?: {...} },
- *       ...
- *     ]
- *   }
+ * Body: { metrics: [{ type, value, unit?, recorded_at, ended_at?, source?, metadata? }, ...] }
+ * Auth: x-health-secret header
+ * User: HEALTH_INGEST_USER_ID env var (single-user MVP)
  *
- * Idempotent — uses (user_id, metric_type, recorded_at, source) unique constraint.
- * Single-user MVP: HEALTH_INGEST_USER_ID env var attaches all rows to Naldo.
+ * For Health Auto Export use /api/health/ingest-hae instead.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { z } from "zod";
+import { METRIC_TYPES, upsertMetrics, type HealthRecord } from "@/lib/health";
 
 export const runtime = "nodejs";
-
-const METRIC_TYPES = [
-  "weight", "body_fat_percent", "lean_body_mass", "body_temperature",
-  "steps", "distance_meters", "flights_climbed",
-  "active_calories", "basal_calories", "exercise_minutes", "stand_hours",
-  "heart_rate", "resting_heart_rate", "hrv_ms",
-  "systolic_bp", "diastolic_bp", "spo2", "vo2_max",
-  "sleep_hours", "sleep_efficiency", "time_in_bed_hours",
-  "workout_minutes", "workout_calories", "workout_distance_meters",
-  "mindful_minutes",
-  "water_ml", "caffeine_mg", "protein_g", "carbs_g", "fat_g", "calories_consumed",
-] as const;
 
 const metricSchema = z.object({
   type: z.enum(METRIC_TYPES),
@@ -54,19 +38,13 @@ export async function POST(request: NextRequest) {
 
   const userId = process.env.HEALTH_INGEST_USER_ID;
   if (!userId) {
-    return NextResponse.json(
-      { error: "owner_user_id_not_configured" },
-      { status: 503 }
-    );
+    return NextResponse.json({ error: "owner_user_id_not_configured" }, { status: 503 });
   }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !serviceKey) {
-    return NextResponse.json(
-      { error: "supabase_not_configured" },
-      { status: 503 }
-    );
+    return NextResponse.json({ error: "supabase_not_configured" }, { status: 503 });
   }
 
   let parsed: z.infer<typeof bodySchema>;
@@ -82,8 +60,7 @@ export async function POST(request: NextRequest) {
     cookies: { getAll: () => [], setAll: () => {} },
   });
 
-  const rows = parsed.metrics.map((m) => ({
-    user_id: userId,
+  const records: HealthRecord[] = parsed.metrics.map((m) => ({
     metric_type: m.type,
     value: m.value,
     unit: m.unit ?? null,
@@ -93,24 +70,16 @@ export async function POST(request: NextRequest) {
     metadata: m.metadata ?? null,
   }));
 
-  // Upsert ignores duplicates — Shortcut may resend the same window without
-  // creating dupes. ignoreDuplicates uses INSERT ... ON CONFLICT DO NOTHING.
-  const { error } = await supabase
-    .from("health_metrics")
-    .upsert(rows, {
-      onConflict: "user_id,metric_type,recorded_at,source",
-      ignoreDuplicates: true,
-    });
-
-  if (error) {
+  const result = await upsertMetrics(supabase, userId, records);
+  if (result.error) {
     return NextResponse.json(
-      { error: "insert_failed", detail: error.message },
+      { error: "insert_failed", detail: result.error },
       { status: 500 }
     );
   }
 
   return NextResponse.json({
-    received: rows.length,
+    received: result.attempted,
     ts: new Date().toISOString(),
   });
 }
