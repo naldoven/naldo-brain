@@ -8,8 +8,11 @@ import {
   Moon,
   Dumbbell,
   Activity,
-  Droplet,
   Brain as BrainIcon,
+  Sparkles,
+  AlertTriangle,
+  CheckCircle2,
+  Info,
 } from "lucide-react";
 
 type MetricRow = {
@@ -21,7 +24,14 @@ type MetricRow = {
   source: string;
 };
 
-type Props = { metrics: MetricRow[] };
+type HealthGoals = {
+  weight_lbs: number;
+  steps_daily: number;
+  sleep_hours_nightly: number;
+  workout_days_weekly: number;
+};
+
+type Props = { metrics: MetricRow[]; goals: HealthGoals };
 
 const TZ = "America/New_York";
 
@@ -113,13 +123,13 @@ function relativeTime(iso: string): string {
 
 // ---------- component -------------------------------------------------------
 
-export function HealthView({ metrics }: Props) {
+export function HealthView({ metrics, goals }: Props) {
   const today = todayKey();
 
   const stats = useMemo(() => {
     const latestWeight = latest(metrics, "weight");
-    const latestRhr = latest(metrics, "resting_heart_rate");
-    const latestHrv = latest(metrics, "hrv_ms");
+    const latestSleepEff = latest(metrics, "sleep_efficiency");
+    const latestBodyFat = latest(metrics, "body_fat_percent");
 
     const stepsSeries = dailySeries(metrics, "steps", 14, "sum");
     const sleepSeries = dailySeries(metrics, "sleep_hours", 14, "max");
@@ -146,8 +156,8 @@ export function HealthView({ metrics }: Props) {
 
     return {
       latestWeight,
-      latestRhr,
-      latestHrv,
+      latestSleepEff,
+      latestBodyFat,
       stepsSeries,
       sleepSeries,
       weightSeries90,
@@ -198,8 +208,14 @@ export function HealthView({ metrics }: Props) {
           }
           sub={
             stats.latestWeight
-              ? relativeTime(stats.latestWeight.recorded_at)
+              ? `goal ${goals.weight_lbs} · ${relativeTime(stats.latestWeight.recorded_at)}`
               : "no data"
+          }
+          progress={
+            stats.latestWeight
+              ? // Lower-is-better when current > goal: invert so closer-to-goal fills more.
+                Math.max(0, Math.min(1, goals.weight_lbs / stats.latestWeight.value))
+              : 0
           }
           accent="from-rose-500/20 to-rose-500/5"
         />
@@ -207,7 +223,8 @@ export function HealthView({ metrics }: Props) {
           icon={Footprints}
           label="Steps today"
           value={formatNumber(stats.todaySteps)}
-          sub={`7-day avg ${formatNumber(stats.sevenDayStepAvg)}`}
+          sub={`goal ${formatNumber(goals.steps_daily)} · 7d avg ${formatNumber(stats.sevenDayStepAvg)}`}
+          progress={Math.max(0, Math.min(1, stats.todaySteps / goals.steps_daily))}
           accent="from-emerald-500/20 to-emerald-500/5"
         />
         <KpiCard
@@ -215,9 +232,16 @@ export function HealthView({ metrics }: Props) {
           label="Sleep last night"
           value={stats.sleepLast > 0 ? `${stats.sleepLast.toFixed(1)} hr` : "—"}
           sub={
-            stats.sevenDaySleepAvg > 0
-              ? `7-day avg ${stats.sevenDaySleepAvg.toFixed(1)} hr`
+            stats.sleepLast > 0
+              ? `goal ${goals.sleep_hours_nightly}h · 7d avg ${
+                  stats.sevenDaySleepAvg > 0 ? stats.sevenDaySleepAvg.toFixed(1) : "—"
+                }h`
               : "no data"
+          }
+          progress={
+            stats.sleepLast > 0
+              ? Math.max(0, Math.min(1, stats.sleepLast / goals.sleep_hours_nightly))
+              : 0
           }
           accent="from-indigo-500/20 to-indigo-500/5"
         />
@@ -225,42 +249,34 @@ export function HealthView({ metrics }: Props) {
           icon={Dumbbell}
           label="Workouts this wk"
           value={`${stats.workoutDaysThisWeek}d / ${formatNumber(stats.workoutMinThisWeek)} min`}
-          sub={
-            stats.workoutDaysThisWeek === 0
-              ? "lift this week"
-              : `${stats.workoutDaysThisWeek === 1 ? "day" : "days"} active`
-          }
+          sub={`goal ${goals.workout_days_weekly} ${goals.workout_days_weekly === 1 ? "day" : "days"}/wk`}
+          progress={Math.max(
+            0,
+            Math.min(1, stats.workoutDaysThisWeek / goals.workout_days_weekly)
+          )}
           accent="from-amber-500/20 to-amber-500/5"
         />
       </div>
 
-      {/* Secondary cardio stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-        <SmallStat
-          icon={Activity}
-          label="Resting HR"
-          value={stats.latestRhr ? `${formatNumber(stats.latestRhr.value)} bpm` : "—"}
-        />
-        <SmallStat
-          icon={Droplet}
-          label="HRV"
-          value={
-            stats.latestHrv
-              ? `${formatNumber(stats.latestHrv.value)} ms`
-              : "—"
-          }
-        />
-        <SmallStat
-          icon={BrainIcon}
-          label="Sleep efficiency"
-          value={
-            (() => {
-              const m = latest(metrics, "sleep_efficiency");
-              return m ? `${formatNumber(m.value, 0)}%` : "—";
-            })()
-          }
-        />
-      </div>
+      {/* Body composition (rendered only when data present) */}
+      {(stats.latestBodyFat || stats.latestSleepEff) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+          {stats.latestBodyFat && (
+            <SmallStat
+              icon={Activity}
+              label="Body fat"
+              value={`${formatNumber(stats.latestBodyFat.value, 1)}%`}
+            />
+          )}
+          {stats.latestSleepEff && (
+            <SmallStat
+              icon={BrainIcon}
+              label="Sleep efficiency"
+              value={`${formatNumber(stats.latestSleepEff.value, 0)}%`}
+            />
+          )}
+        </div>
+      )}
 
       {/* Trend charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -292,12 +308,14 @@ function KpiCard({
   value,
   sub,
   accent,
+  progress,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   value: string;
   sub: string;
   accent: string;
+  progress?: number;        // 0..1 — renders a small progress bar when defined
 }) {
   return (
     <div
@@ -309,6 +327,14 @@ function KpiCard({
       </div>
       <div className="text-2xl font-bold mt-1">{value}</div>
       <div className="text-[11px] text-zinc-400 mt-0.5">{sub}</div>
+      {typeof progress === "number" && (
+        <div className="mt-2 h-1 rounded-full bg-white/10 overflow-hidden">
+          <div
+            className="h-full bg-white/70"
+            style={{ width: `${Math.max(0, Math.min(1, progress)) * 100}%` }}
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -40,6 +40,65 @@ function startOfDayInTz(now: Date, tz: string): Date {
   return new Date(probe.getTime() - hourInTz * 60 * 60 * 1000);
 }
 
+// $500K target lives here so it's defined exactly once across briefings + UI.
+const REVENUE_TARGET_USD = 500000;
+
+function summarizeBusiness(input: {
+  ytdWonRows: { monetary_value?: number | null }[];
+  openRows: { monetary_value?: number | null }[];
+  weekWonRows: { monetary_value?: number | null }[];
+  newLeadsThisWeek: number;
+  now: Date;
+}): BriefContext["business"] | undefined {
+  const { ytdWonRows, openRows, weekWonRows, newLeadsThisWeek, now } = input;
+  const hasAny =
+    ytdWonRows.length > 0 ||
+    openRows.length > 0 ||
+    weekWonRows.length > 0 ||
+    newLeadsThisWeek > 0;
+  if (!hasAny) return undefined;
+
+  const sum = (rows: { monetary_value?: number | null }[]) =>
+    rows.reduce((s, r) => s + (Number(r.monetary_value) || 0), 0);
+
+  const revenueYtd = sum(ytdWonRows);
+  const pipelineValue = sum(openRows);
+  const wonThisWeekValue = sum(weekWonRows);
+
+  const yearStart = new Date(now.getFullYear(), 0, 1).getTime();
+  const dayOfYear = Math.max(
+    1,
+    Math.round((now.getTime() - yearStart) / 86400000)
+  );
+  const yearEnd = new Date(now.getFullYear() + 1, 0, 1).getTime();
+  const daysLeftInYear = Math.max(
+    1,
+    Math.round((yearEnd - now.getTime()) / 86400000)
+  );
+
+  const dailyRunRate = revenueYtd / dayOfYear;
+  const eoyProjection = dailyRunRate * 365;
+  const revenueRemaining = Math.max(0, REVENUE_TARGET_USD - revenueYtd);
+  const revenuePctToTarget = revenueYtd / REVENUE_TARGET_USD;
+  const requiredDailyToHitTarget = revenueRemaining / daysLeftInYear;
+
+  return {
+    revenueYtd: Math.round(revenueYtd),
+    revenueTarget: REVENUE_TARGET_USD,
+    revenueRemaining: Math.round(revenueRemaining),
+    revenuePctToTarget: +revenuePctToTarget.toFixed(3),
+    dailyRunRate: Math.round(dailyRunRate),
+    eoyProjection: Math.round(eoyProjection),
+    pipelineValue: Math.round(pipelineValue),
+    openCount: openRows.length,
+    wonThisWeekCount: weekWonRows.length,
+    wonThisWeekValue: Math.round(wonThisWeekValue),
+    newLeadsThisWeek,
+    daysLeftInYear,
+    requiredDailyToHitTarget: Math.round(requiredDailyToHitTarget),
+  };
+}
+
 /** YYYY-MM-DD in `tz` — used to bucket health metrics by Naldo's local day. */
 function dayKeyTz(iso: string, tz: string): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -290,6 +349,22 @@ export type BriefContext = {
     workoutMinutes7d: number;
     rhrLatest: number | null;
   };
+  // Business snapshot (GoHighLevel → gohighlevel_opportunities). Empty when nothing synced yet.
+  business?: {
+    revenueYtd: number;
+    revenueTarget: number;
+    revenueRemaining: number;
+    revenuePctToTarget: number;            // 0..1
+    dailyRunRate: number;
+    eoyProjection: number;
+    pipelineValue: number;
+    openCount: number;
+    wonThisWeekCount: number;
+    wonThisWeekValue: number;
+    newLeadsThisWeek: number;
+    daysLeftInYear: number;
+    requiredDailyToHitTarget: number;
+  };
   // Window-specific data
   weekStats?: {
     tasksCompleted: number;
@@ -317,6 +392,8 @@ export async function gatherBriefContext(
   const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const oneMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
+  const yearStartIso = new Date(now.getFullYear(), 0, 1).toISOString();
+
   const [
     tasks,
     avoidance,
@@ -326,6 +403,10 @@ export async function gatherBriefContext(
     captures,
     memories,
     health,
+    ghlYtdWon,
+    ghlOpen,
+    ghlWeekWon,
+    ghlWeekNew,
   ] = await Promise.all([
     supabase
       .from("tasks")
@@ -385,6 +466,38 @@ export async function gatherBriefContext(
       .gte("recorded_at", new Date(now.getTime() - 14 * 86400000).toISOString())
       .order("recorded_at", { ascending: false })
       .limit(2000),
+
+    // GoHighLevel — won deals YTD (revenue toward $500K target)
+    supabase
+      .from("gohighlevel_opportunities")
+      .select("monetary_value, ghl_status_changed_at, ghl_updated_at")
+      .eq("user_id", userId)
+      .eq("status", "won")
+      .or(
+        `ghl_status_changed_at.gte.${yearStartIso},and(ghl_status_changed_at.is.null,ghl_updated_at.gte.${yearStartIso})`
+      ),
+
+    // Open opportunities — current pipeline value
+    supabase
+      .from("gohighlevel_opportunities")
+      .select("monetary_value")
+      .eq("user_id", userId)
+      .eq("status", "open"),
+
+    // Won this week
+    supabase
+      .from("gohighlevel_opportunities")
+      .select("monetary_value")
+      .eq("user_id", userId)
+      .eq("status", "won")
+      .gte("ghl_status_changed_at", oneWeekAgo.toISOString()),
+
+    // New leads this week (any status, freshly created in last 7 days)
+    supabase
+      .from("gohighlevel_opportunities")
+      .select("external_id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .gte("ghl_created_at", oneWeekAgo.toISOString()),
   ]);
 
   const ctx: BriefContext = {
@@ -405,6 +518,13 @@ export async function gatherBriefContext(
     recentCaptures: captures.data ?? [],
     recentMemories: memories.data ?? [],
     health: summarizeHealth(health.data ?? [], now),
+    business: summarizeBusiness({
+      ytdWonRows: ghlYtdWon.data ?? [],
+      openRows: ghlOpen.data ?? [],
+      weekWonRows: ghlWeekWon.data ?? [],
+      newLeadsThisWeek: ghlWeekNew.count ?? 0,
+      now,
+    }),
   };
 
   if (type === "weekly") {
@@ -577,6 +697,29 @@ function buildBriefUserPrompt(ctx: BriefContext, localTime: string): string {
     for (const a of ctx.flaggedAvoidance) {
       lines.push(`- ${a.title} (flagged ${a.days_flagged}d)`);
     }
+  }
+
+  if (ctx.business) {
+    const b = ctx.business;
+    const fmt = (n: number) =>
+      n.toLocaleString("en-US", {
+        style: "currency",
+        currency: "USD",
+        maximumFractionDigits: 0,
+      });
+    lines.push("", "YLL BUSINESS (GoHighLevel):");
+    lines.push(
+      `- Revenue YTD: ${fmt(b.revenueYtd)} of ${fmt(b.revenueTarget)} (${(b.revenuePctToTarget * 100).toFixed(1)}%)`
+    );
+    lines.push(
+      `- To hit $500K: need ${fmt(b.requiredDailyToHitTarget)}/day for the next ${b.daysLeftInYear} days (current pace: ${fmt(b.dailyRunRate)}/day → ${fmt(b.eoyProjection)} EOY)`
+    );
+    lines.push(
+      `- Pipeline: ${fmt(b.pipelineValue)} across ${b.openCount} open ${b.openCount === 1 ? "deal" : "deals"}`
+    );
+    lines.push(
+      `- This week: ${b.wonThisWeekCount} won (${fmt(b.wonThisWeekValue)}), ${b.newLeadsThisWeek} new ${b.newLeadsThisWeek === 1 ? "lead" : "leads"}`
+    );
   }
 
   if (ctx.health) {

@@ -9,6 +9,18 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+/**
+ * Personal targets used by the Health page + brief LLM. Override via env vars
+ * if you want to adjust without a redeploy. Single-user MVP — when we move to
+ * multi-user we'll back this with a `health_goals` table per user.
+ */
+export const HEALTH_GOALS = {
+  weight_lbs: Number(process.env.HEALTH_GOAL_WEIGHT_LBS ?? 200),
+  steps_daily: Number(process.env.HEALTH_GOAL_STEPS_DAILY ?? 10000),
+  sleep_hours_nightly: Number(process.env.HEALTH_GOAL_SLEEP_HOURS ?? 7),
+  workout_days_weekly: Number(process.env.HEALTH_GOAL_WORKOUT_DAYS ?? 3),
+};
+
 export const METRIC_TYPES = [
   // Body
   "weight", "body_fat_percent", "lean_body_mass", "body_temperature",
