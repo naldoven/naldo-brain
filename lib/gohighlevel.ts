@@ -113,9 +113,11 @@ export async function fetchAllOpportunities(
   token: string,
   locationId: string,
   options: { pageSize?: number; updatedSince?: string } = {}
-): Promise<GhlOpportunity[]> {
+): Promise<{ items: GhlOpportunity[]; lastMeta?: unknown; pages: number }> {
   const pageSize = options.pageSize ?? 100;
   const out: GhlOpportunity[] = [];
+  let lastMeta: unknown = undefined;
+  let pages = 0;
 
   let startAfter: string | null = null;
   let startAfterId: string | null = null;
@@ -143,22 +145,35 @@ export async function fetchAllOpportunities(
     const items = res.opportunities ?? [];
     if (items.length === 0) break;
     out.push(...items);
+    pages++;
 
-    const meta: NonNullable<GhlSearchResponse["meta"]> = res.meta ?? {};
-    if (meta.nextPageUrl) {
+    const meta = (res.meta ?? {}) as Record<string, unknown>;
+    lastMeta = meta;
+
+    // Style 1: explicit next-page URL
+    if (typeof meta.nextPageUrl === "string" && meta.nextPageUrl) {
       nextUrl = meta.nextPageUrl;
       startAfter = null;
       startAfterId = null;
-    } else if (meta.startAfter && meta.startAfterId) {
+      continue;
+    }
+    // Style 2: cursor (startAfter + startAfterId — strings or numbers)
+    if (
+      meta.startAfter !== undefined &&
+      meta.startAfter !== null &&
+      meta.startAfterId !== undefined &&
+      meta.startAfterId !== null
+    ) {
       nextUrl = null;
       startAfter = String(meta.startAfter);
       startAfterId = String(meta.startAfterId);
-    } else {
-      break;
+      continue;
     }
+    // No further cursor — done.
+    break;
   }
 
-  return out;
+  return { items: out, lastMeta, pages };
 }
 
 // ---- Sync into local Postgres --------------------------------------------
@@ -175,6 +190,8 @@ export async function syncFromGhl(
 ): Promise<{
   opportunities: number;
   pipelines: number;
+  pages: number;
+  lastMeta?: unknown;
   errors: string[];
 }> {
   const errors: string[] = [];
@@ -215,8 +232,13 @@ export async function syncFromGhl(
 
   // --- Opportunities
   let opps: GhlOpportunity[] = [];
+  let lastMeta: unknown = undefined;
+  let pages = 0;
   try {
-    opps = await fetchAllOpportunities(token, locationId);
+    const result = await fetchAllOpportunities(token, locationId);
+    opps = result.items;
+    lastMeta = result.lastMeta;
+    pages = result.pages;
   } catch (err) {
     errors.push(`fetchAllOpportunities: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -263,6 +285,8 @@ export async function syncFromGhl(
   return {
     opportunities: opps.length,
     pipelines: pipelines.length,
+    pages,
+    lastMeta,
     errors,
   };
 }
