@@ -278,13 +278,17 @@ export function HealthView({ metrics, goals }: Props) {
         </div>
       )}
 
-      {/* Trend charts */}
+      {/* Coach — rule-based tips against your goals */}
+      <CoachCard stats={stats} goals={goals} />
+
+      {/* Trend charts — 4 charts each 14d (or 90d for weight) so every goal has a visual */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <ChartCard title="Weight (90d)" unit={stats.latestWeight?.unit ?? "lbs"}>
           <Sparkline
             points={stats.weightSeries90.map((d) => d.value)}
             color="#f43f5e"
-            height={120}
+            goalLine={goals.weight_lbs}
+            height={140}
           />
         </ChartCard>
 
@@ -292,12 +296,223 @@ export function HealthView({ metrics, goals }: Props) {
           <BarChart
             points={stats.stepsSeries}
             color="#10b981"
-            height={120}
+            goalLine={goals.steps_daily}
+            height={140}
+          />
+        </ChartCard>
+
+        <ChartCard title="Sleep (14d)" unit="hr">
+          <BarChart
+            points={stats.sleepSeries}
+            color="#6366f1"
+            goalLine={goals.sleep_hours_nightly}
+            height={140}
+            emptyMsg="No sleep data — toggle Sleep Analysis on in HAE."
+          />
+        </ChartCard>
+
+        <ChartCard title="Workout minutes (14d)" unit="min">
+          <BarChart
+            points={stats.workoutMinSeries}
+            color="#f59e0b"
+            height={140}
+            emptyMsg="No workout data — toggle Workouts on in HAE."
           />
         </ChartCard>
       </div>
     </div>
   );
+}
+
+// ---------- Coach card ------------------------------------------------------
+
+type Tip = { tone: "good" | "warn" | "info"; text: string };
+
+function CoachCard({
+  stats,
+  goals,
+}: {
+  stats: {
+    latestWeight: MetricRow | null;
+    todaySteps: number;
+    sevenDayStepAvg: number;
+    sleepLast: number;
+    sevenDaySleepAvg: number;
+    workoutDaysThisWeek: number;
+    workoutMinThisWeek: number;
+    weightSeries90: { day: string; value: number }[];
+  };
+  goals: HealthGoals;
+}) {
+  const tips = useMemo(() => generateTips(stats, goals), [stats, goals]);
+  if (tips.length === 0) return null;
+
+  const toGo = stats.latestWeight
+    ? Math.max(0, stats.latestWeight.value - goals.weight_lbs)
+    : 0;
+
+  return (
+    <div className="glass-strong rounded-2xl p-5 mb-4 border border-indigo-500/20">
+      <div className="flex items-center gap-2 mb-3">
+        <Sparkles className="size-4 text-indigo-300" />
+        <h3 className="font-bold text-sm">Coach</h3>
+        <span className="text-[10px] text-zinc-500 ml-1">
+          targets: {goals.weight_lbs} lb · {formatNumber(goals.steps_daily)} steps · {goals.sleep_hours_nightly}h sleep · {goals.workout_days_weekly} workouts/wk
+        </span>
+      </div>
+      <ul className="space-y-2">
+        {tips.map((t, i) => (
+          <li key={i} className="flex items-start gap-2 text-sm">
+            {t.tone === "good" && (
+              <CheckCircle2 className="size-4 text-emerald-400 mt-0.5 shrink-0" />
+            )}
+            {t.tone === "warn" && (
+              <AlertTriangle className="size-4 text-amber-400 mt-0.5 shrink-0" />
+            )}
+            {t.tone === "info" && (
+              <Info className="size-4 text-indigo-300 mt-0.5 shrink-0" />
+            )}
+            <span className="text-zinc-200">{t.text}</span>
+          </li>
+        ))}
+      </ul>
+      {toGo > 0 && (
+        <div className="text-[11px] text-zinc-500 mt-3 pt-3 border-t border-white/5">
+          At a sustainable 1.5 lb/wk loss, you&apos;d hit {goals.weight_lbs} lb in ~
+          {Math.ceil(toGo / 1.5)} weeks. 1 lb/wk = ~{Math.ceil(toGo)} weeks.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function generateTips(
+  stats: {
+    latestWeight: MetricRow | null;
+    todaySteps: number;
+    sevenDayStepAvg: number;
+    sleepLast: number;
+    sevenDaySleepAvg: number;
+    workoutDaysThisWeek: number;
+    workoutMinThisWeek: number;
+    weightSeries90: { day: string; value: number }[];
+  },
+  goals: HealthGoals
+): Tip[] {
+  const tips: Tip[] = [];
+
+  // Compute weight delta from the 7d-ago closest reading
+  let weightDelta7d: number | null = null;
+  if (stats.latestWeight && stats.weightSeries90.length >= 2) {
+    const last = stats.latestWeight.value;
+    const target = Date.now() - 7 * 86400000;
+    const ref = stats.weightSeries90
+      .map((p) => ({
+        v: p.value,
+        diff: Math.abs(new Date(p.day).getTime() - target),
+      }))
+      .sort((a, b) => a.diff - b.diff)[0];
+    if (ref && ref.diff < 5 * 86400000) {
+      weightDelta7d = +(last - ref.v).toFixed(1);
+    }
+  }
+
+  // Weight
+  if (stats.latestWeight) {
+    const lbsToGo = stats.latestWeight.value - goals.weight_lbs;
+    if (lbsToGo <= 0) {
+      tips.push({
+        tone: "good",
+        text: `At or below ${goals.weight_lbs} lb. Maintenance — keep training and protein.`,
+      });
+    } else if (weightDelta7d !== null && weightDelta7d > 0.5) {
+      tips.push({
+        tone: "warn",
+        text: `Weight up ${weightDelta7d.toFixed(1)} lb this week, ${lbsToGo.toFixed(1)} lb from goal. Tighten calories — audit weekend eating first.`,
+      });
+    } else if (weightDelta7d !== null && weightDelta7d < -0.3) {
+      tips.push({
+        tone: "good",
+        text: `Down ${Math.abs(weightDelta7d).toFixed(1)} lb this week — that's the right pace. Stay the course.`,
+      });
+    } else {
+      tips.push({
+        tone: "info",
+        text: `${lbsToGo.toFixed(1)} lb to goal. 500 cal/day deficit ≈ 1 lb/wk; 750/day ≈ 1.5 lb/wk.`,
+      });
+    }
+  }
+
+  // Steps — today
+  if (stats.todaySteps > 0) {
+    const todayPct = stats.todaySteps / goals.steps_daily;
+    if (todayPct >= 1) {
+      tips.push({
+        tone: "good",
+        text: `Already past ${formatNumber(goals.steps_daily)} steps today. Pure win.`,
+      });
+    } else if (todayPct < 0.4) {
+      const remaining = goals.steps_daily - stats.todaySteps;
+      tips.push({
+        tone: "warn",
+        text: `${formatNumber(remaining)} steps left to hit ${formatNumber(goals.steps_daily)} today. A 30-min walk closes ~3,500.`,
+      });
+    }
+  }
+
+  // Steps — 7d trend
+  if (
+    stats.sevenDayStepAvg > 0 &&
+    stats.sevenDayStepAvg < goals.steps_daily * 0.7
+  ) {
+    tips.push({
+      tone: "warn",
+      text: `7-day avg ${formatNumber(stats.sevenDayStepAvg)} — well under ${formatNumber(goals.steps_daily)}. Lock a daily walk on the calendar.`,
+    });
+  }
+
+  // Sleep — last night
+  if (stats.sleepLast > 0) {
+    const deficit = goals.sleep_hours_nightly - stats.sleepLast;
+    if (deficit >= 1.5) {
+      tips.push({
+        tone: "warn",
+        text: `${stats.sleepLast.toFixed(1)} hr last night — ${deficit.toFixed(1)} short. Hard cutoff at 11pm tonight.`,
+      });
+    } else if (deficit > 0) {
+      tips.push({
+        tone: "info",
+        text: `${stats.sleepLast.toFixed(1)} hr last night. Push lights-out 30 min earlier to hit ${goals.sleep_hours_nightly}.`,
+      });
+    }
+  }
+
+  // Sleep — chronic deficit (skip if we already nudged about last night)
+  if (
+    stats.sleepLast === 0 &&
+    stats.sevenDaySleepAvg > 0 &&
+    stats.sevenDaySleepAvg < goals.sleep_hours_nightly - 0.75
+  ) {
+    tips.push({
+      tone: "warn",
+      text: `Sleeping ${stats.sevenDaySleepAvg.toFixed(1)} hr/night avg — chronic ${(goals.sleep_hours_nightly - stats.sevenDaySleepAvg).toFixed(1)} hr deficit. Fix the bedtime, not the morning.`,
+    });
+  }
+
+  // Workouts
+  if (stats.workoutDaysThisWeek === 0) {
+    tips.push({
+      tone: "warn",
+      text: "No workouts logged this week. Even a 20-min walk gets you on the board.",
+    });
+  } else if (stats.workoutDaysThisWeek >= goals.workout_days_weekly) {
+    tips.push({
+      tone: "good",
+      text: `${stats.workoutDaysThisWeek} workout days hit the ${goals.workout_days_weekly}+ goal. Recovery days matter as much as hard days.`,
+    });
+  }
+
+  return tips;
 }
 
 // ---------- subcomponents ---------------------------------------------------
@@ -385,31 +600,42 @@ function Sparkline({
   points,
   color,
   height = 100,
+  goalLine,
 }: {
   points: number[];
   color: string;
   height?: number;
+  goalLine?: number;
 }) {
   if (points.length === 0) {
     return <EmptyChart>No data yet</EmptyChart>;
   }
-  const min = Math.min(...points);
-  const max = Math.max(...points);
+  const min = Math.min(...points, goalLine ?? Infinity);
+  const max = Math.max(...points, goalLine ?? -Infinity);
   const range = max - min || 1;
   const w = 600;
   const h = height;
   const step = points.length > 1 ? w / (points.length - 1) : 0;
+  const yFor = (v: number) => h - ((v - min) / range) * (h - 8) - 4;
   const path = points
-    .map((v, i) => {
-      const x = i * step;
-      const y = h - ((v - min) / range) * (h - 8) - 4;
-      return `${i === 0 ? "M" : "L"} ${x} ${y}`;
-    })
+    .map((v, i) => `${i === 0 ? "M" : "L"} ${i * step} ${yFor(v)}`)
     .join(" ");
 
   return (
     <div className="relative">
       <svg viewBox={`0 0 ${w} ${h}`} className="w-full" preserveAspectRatio="none">
+        {goalLine !== undefined && (
+          <line
+            x1={0}
+            y1={yFor(goalLine)}
+            x2={w}
+            y2={yFor(goalLine)}
+            stroke="#a1a1aa"
+            strokeWidth="1"
+            strokeDasharray="4 4"
+            opacity="0.5"
+          />
+        )}
         <path
           d={path}
           fill="none"
@@ -421,6 +647,7 @@ function Sparkline({
       </svg>
       <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
         <span>min {min.toFixed(1)}</span>
+        {goalLine !== undefined && <span className="text-zinc-400">goal {goalLine}</span>}
         <span>max {max.toFixed(1)}</span>
       </div>
     </div>
@@ -431,21 +658,34 @@ function BarChart({
   points,
   color,
   height = 100,
+  goalLine,
+  emptyMsg = "No data yet",
 }: {
   points: { day: string; value: number }[];
   color: string;
   height?: number;
+  goalLine?: number;
+  emptyMsg?: string;
 }) {
   if (points.length === 0 || points.every((p) => p.value === 0)) {
-    return <EmptyChart>No data yet</EmptyChart>;
+    return <EmptyChart>{emptyMsg}</EmptyChart>;
   }
-  const max = Math.max(...points.map((p) => p.value), 1);
+  const max = Math.max(...points.map((p) => p.value), goalLine ?? 1);
+  const goalPct = goalLine !== undefined ? (goalLine / max) * 100 : null;
   return (
     <div className="space-y-1">
-      <div className="flex items-end gap-1" style={{ height }}>
+      <div className="relative flex items-end gap-1" style={{ height }}>
+        {goalPct !== null && (
+          <div
+            className="absolute left-0 right-0 border-t border-dashed border-white/30 pointer-events-none"
+            style={{ bottom: `${goalPct}%` }}
+            title={`Goal ${goalLine}`}
+          />
+        )}
         {points.map((p) => {
           const h = (p.value / max) * 100;
           const isToday = p.day === todayKey();
+          const hitGoal = goalLine !== undefined && p.value >= goalLine;
           return (
             <div
               key={p.day}
@@ -453,7 +693,7 @@ function BarChart({
               style={{
                 height: `${h}%`,
                 backgroundColor: color,
-                opacity: isToday ? 1 : 0.55,
+                opacity: isToday ? 1 : hitGoal ? 0.85 : 0.5,
               }}
               title={`${p.day}: ${p.value.toLocaleString()}`}
             />
@@ -462,6 +702,9 @@ function BarChart({
       </div>
       <div className="flex justify-between text-[10px] text-zinc-500">
         <span>{points[0]?.day.slice(5)}</span>
+        {goalLine !== undefined && (
+          <span className="text-zinc-400">goal {goalLine.toLocaleString()}</span>
+        )}
         <span>today</span>
       </div>
     </div>
@@ -470,7 +713,7 @@ function BarChart({
 
 function EmptyChart({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-center h-24 text-xs text-zinc-500">
+    <div className="flex items-center justify-center h-32 text-xs text-zinc-500 px-4 text-center">
       {children}
     </div>
   );

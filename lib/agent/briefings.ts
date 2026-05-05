@@ -7,6 +7,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { NALDOS_GOALS } from "@/lib/prompts";
+import { HEALTH_GOALS } from "@/lib/health";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = "claude-sonnet-4-6";
@@ -725,27 +726,33 @@ function buildBriefUserPrompt(ctx: BriefContext, localTime: string): string {
   if (ctx.health) {
     const h = ctx.health;
     lines.push("", "HEALTH SNAPSHOT:");
+    lines.push(
+      `- TARGETS: ${HEALTH_GOALS.weight_lbs} lb, ${HEALTH_GOALS.steps_daily.toLocaleString()} steps/day, ${HEALTH_GOALS.sleep_hours_nightly} hr sleep/night, ${HEALTH_GOALS.workout_days_weekly}+ workouts/week`
+    );
     if (h.weightLatest) {
+      const toGo = (h.weightLatest.value - HEALTH_GOALS.weight_lbs).toFixed(1);
       const delta =
         h.weightDelta7d === null
           ? ""
           : ` (${h.weightDelta7d > 0 ? "+" : ""}${h.weightDelta7d} vs 7d ago)`;
       lines.push(
-        `- Weight: ${h.weightLatest.value.toFixed(1)} ${h.weightLatest.unit ?? "lbs"}${delta}`
+        `- Weight: ${h.weightLatest.value.toFixed(1)} ${h.weightLatest.unit ?? "lbs"}${delta} — ${toGo} lb to goal`
       );
     }
+    const stepGap = HEALTH_GOALS.steps_daily - h.stepsToday;
     lines.push(
-      `- Steps today: ${h.stepsToday.toLocaleString()} (7d avg ${h.stepsAvg7d.toLocaleString()})`
+      `- Steps today: ${h.stepsToday.toLocaleString()} (7d avg ${h.stepsAvg7d.toLocaleString()}) — ${stepGap > 0 ? `${stepGap.toLocaleString()} to ${HEALTH_GOALS.steps_daily.toLocaleString()} goal` : "goal hit"}`
     );
     if (h.sleepLastNightHours !== null) {
+      const sleepGap = +(HEALTH_GOALS.sleep_hours_nightly - h.sleepLastNightHours).toFixed(1);
       const avg =
         h.sleepAvg7dHours !== null ? ` (7d avg ${h.sleepAvg7dHours} hr)` : "";
       lines.push(
-        `- Sleep last night: ${h.sleepLastNightHours.toFixed(1)} hr${avg}`
+        `- Sleep last night: ${h.sleepLastNightHours.toFixed(1)} hr${avg} — ${sleepGap > 0 ? `${sleepGap} hr short of ${HEALTH_GOALS.sleep_hours_nightly} hr goal` : "goal hit"}`
       );
     }
     lines.push(
-      `- Workouts (7d): ${h.workoutDays7d} day${h.workoutDays7d === 1 ? "" : "s"}, ${h.workoutMinutes7d} min`
+      `- Workouts (7d): ${h.workoutDays7d} day${h.workoutDays7d === 1 ? "" : "s"}, ${h.workoutMinutes7d} min — ${h.workoutDays7d >= HEALTH_GOALS.workout_days_weekly ? "goal hit" : `${HEALTH_GOALS.workout_days_weekly - h.workoutDays7d} more to hit ${HEALTH_GOALS.workout_days_weekly}+/wk goal`}`
     );
     if (h.rhrLatest !== null) {
       lines.push(`- Resting HR: ${h.rhrLatest} bpm`);
