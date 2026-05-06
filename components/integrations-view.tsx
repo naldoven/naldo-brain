@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { Calendar, CheckCircle, XCircle, Loader2, Plug } from "lucide-react";
+import { Calendar, CheckCircle, XCircle, Loader2, Plug, Wallet } from "lucide-react";
 import { toast } from "sonner";
+import { usePlaidLink } from "react-plaid-link";
 
 type GoogleConnection = {
   integration: string;
@@ -13,11 +14,19 @@ type GoogleConnection = {
   created_at: string;
 };
 
-type Props = {
-  googleCalendar: GoogleConnection | null;
+type PlaidItem = {
+  id: string;
+  institution_name: string | null;
+  status: string;
+  last_synced_at: string | null;
 };
 
-export function IntegrationsView({ googleCalendar }: Props) {
+type Props = {
+  googleCalendar: GoogleConnection | null;
+  plaidItems: PlaidItem[];
+};
+
+export function IntegrationsView({ googleCalendar, plaidItems }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [disconnecting, setDisconnecting] = useState(false);
@@ -52,6 +61,80 @@ export function IntegrationsView({ googleCalendar }: Props) {
       return;
     }
     toast.success("Disconnected");
+    router.refresh();
+  }
+
+  // ---- Plaid -------------------------------------------------------------
+  const [plaidLinkToken, setPlaidLinkToken] = useState<string | null>(null);
+  const [plaidLoading, setPlaidLoading] = useState(false);
+  const [disconnectingPlaid, setDisconnectingPlaid] = useState<string | null>(null);
+
+  const requestPlaidLinkToken = useCallback(async () => {
+    setPlaidLoading(true);
+    try {
+      const res = await fetch("/api/plaid/create-link-token", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(`Plaid: ${data.error ?? "couldn't start link flow"}`);
+        return;
+      }
+      setPlaidLinkToken(data.link_token);
+    } catch {
+      toast.error("Couldn't reach Plaid");
+    } finally {
+      setPlaidLoading(false);
+    }
+  }, []);
+
+  const onPlaidSuccess = useCallback(
+    async (publicToken: string) => {
+      const res = await fetch("/api/plaid/exchange-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ public_token: publicToken }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(`Plaid: ${data.error ?? "exchange failed"}`);
+        return;
+      }
+      toast.success(`Connected ${data.institution_name ?? "bank"}`);
+      setPlaidLinkToken(null);
+      router.refresh();
+    },
+    [router]
+  );
+
+  const { open: openPlaid, ready: plaidReady } = usePlaidLink({
+    token: plaidLinkToken,
+    onSuccess: onPlaidSuccess,
+    onExit: (err) => {
+      if (err) toast.error(`Plaid: ${err.display_message ?? err.error_message ?? "cancelled"}`);
+      setPlaidLinkToken(null);
+    },
+  });
+
+  // Auto-open Plaid Link as soon as the token arrives
+  useEffect(() => {
+    if (plaidLinkToken && plaidReady) openPlaid();
+  }, [plaidLinkToken, plaidReady, openPlaid]);
+
+  async function disconnectPlaidItem(itemId: string, label: string) {
+    if (!confirm(`Disconnect ${label}? Synced accounts + transactions will be removed.`)) {
+      return;
+    }
+    setDisconnectingPlaid(itemId);
+    const res = await fetch("/api/plaid/disconnect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_id: itemId }),
+    });
+    setDisconnectingPlaid(null);
+    if (!res.ok) {
+      toast.error("Failed to disconnect");
+      return;
+    }
+    toast.success(`Disconnected ${label}`);
     router.refresh();
   }
 
@@ -132,19 +215,76 @@ export function IntegrationsView({ googleCalendar }: Props) {
           )}
         </div>
 
-        {/* Future integrations placeholder */}
-        <div className="glass rounded-2xl p-5 border-2 border-dashed border-white/10">
+        {/* Plaid (banking) */}
+        <div className="glass-strong rounded-2xl p-5">
           <div className="flex items-start gap-3 mb-3">
-            <div className="size-10 rounded-lg bg-zinc-500/20 flex items-center justify-center text-zinc-500">
-              <Plug className="size-5" />
+            <div className="size-10 rounded-lg bg-emerald-500/20 flex items-center justify-center text-emerald-400">
+              <Wallet className="size-5" />
             </div>
             <div className="flex-1">
-              <h3 className="font-bold text-zinc-400">More integrations coming</h3>
-              <p className="text-xs text-zinc-500">
-                Webhooks · Jobber ICS · GoHighLevel · Plaid (with Phases 3-5)
+              <h3 className="font-bold">Bank accounts (Plaid)</h3>
+              <p className="text-xs text-zinc-400">
+                Connect bank, credit, and loan accounts. Powers the /finance
+                page, debt-payoff tracker, and 30-day cash flow in briefings.
               </p>
             </div>
+            {plaidItems.length > 0 ? (
+              <span className="badge text-xs px-2 py-1 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center gap-1">
+                <CheckCircle className="size-3" /> {plaidItems.length} connected
+              </span>
+            ) : (
+              <span className="badge text-xs px-2 py-1 rounded-full bg-zinc-500/20 text-zinc-400 flex items-center gap-1">
+                <XCircle className="size-3" /> Not connected
+              </span>
+            )}
           </div>
+
+          {plaidItems.length > 0 && (
+            <div className="space-y-2 mb-3">
+              {plaidItems.map((it) => (
+                <div
+                  key={it.id}
+                  className="bg-white/5 rounded-lg p-3 text-xs flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0">
+                    <div className="font-semibold truncate">
+                      {it.institution_name ?? "Bank connection"}
+                    </div>
+                    <div className="text-[10px] text-zinc-500">
+                      status: {it.status}
+                      {it.last_synced_at
+                        ? ` · last sync ${new Date(it.last_synced_at).toLocaleString()}`
+                        : " · never synced"}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() =>
+                      disconnectPlaidItem(it.id, it.institution_name ?? "this connection")
+                    }
+                    disabled={disconnectingPlaid === it.id}
+                    className="text-[11px] px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 text-red-300 disabled:opacity-50 flex items-center gap-1 shrink-0"
+                  >
+                    {disconnectingPlaid === it.id && (
+                      <Loader2 className="size-3 animate-spin" />
+                    )}
+                    Disconnect
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <button
+            onClick={requestPlaidLinkToken}
+            disabled={plaidLoading || (plaidLinkToken !== null && !plaidReady)}
+            className="w-full py-2 rounded-lg text-sm font-semibold brand-gradient text-white flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            {(plaidLoading || (plaidLinkToken !== null && !plaidReady)) && (
+              <Loader2 className="size-3.5 animate-spin" />
+            )}
+            <Plug className="size-4" />{" "}
+            {plaidItems.length > 0 ? "Connect another account" : "Connect a bank account"}
+          </button>
         </div>
       </div>
     </div>

@@ -7,6 +7,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { NALDOS_GOALS, YLL_SEASONALITY_NOTE } from "@/lib/prompts";
+import { summarizeFinance } from "@/lib/plaid";
 import { HEALTH_GOALS } from "@/lib/health";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -366,6 +367,18 @@ export type BriefContext = {
     daysLeftInYear: number;
     requiredDailyToHitTarget: number;
   };
+  // Finance snapshot (Plaid → plaid_accounts + plaid_transactions). Empty when nothing connected.
+  finance?: {
+    cashTotal: number;
+    debtTotal: number;
+    debtPaidOff: number;
+    debtBaseline: number;
+    debtPctPaid: number;                    // 0..1
+    netLiquid: number;
+    burn30d: number;
+    income30d: number;
+    netFlow30d: number;
+  };
   // Window-specific data
   weekStats?: {
     tasksCompleted: number;
@@ -408,6 +421,8 @@ export async function gatherBriefContext(
     ghlOpen,
     ghlWeekWon,
     ghlWeekNew,
+    plaidAccounts,
+    plaidTx,
   ] = await Promise.all([
     supabase
       .from("tasks")
@@ -499,6 +514,21 @@ export async function gatherBriefContext(
       .select("external_id", { count: "exact", head: true })
       .eq("user_id", userId)
       .gte("ghl_created_at", oneWeekAgo.toISOString()),
+
+    // Plaid accounts — current balances for cash + debt
+    supabase
+      .from("plaid_accounts")
+      .select("type, current_balance, is_debt, is_active")
+      .eq("user_id", userId)
+      .eq("is_active", true),
+
+    // Plaid transactions in last 30 days — for income/burn
+    supabase
+      .from("plaid_transactions")
+      .select("amount, date")
+      .eq("user_id", userId)
+      .gte("date", new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10))
+      .limit(5000),
   ]);
 
   const ctx: BriefContext = {
@@ -526,6 +556,20 @@ export async function gatherBriefContext(
       newLeadsThisWeek: ghlWeekNew.count ?? 0,
       now,
     }),
+    finance: ((plaidAccounts.data ?? []).length > 0
+      ? summarizeFinance(
+          (plaidAccounts.data ?? []).map((a) => ({
+            type: a.type as string | null,
+            current_balance: a.current_balance as number | null,
+            is_debt: a.is_debt as boolean | null,
+            is_active: a.is_active as boolean | null,
+          })),
+          (plaidTx.data ?? []).map((t) => ({
+            amount: Number(t.amount),
+            date: t.date as string | null,
+          }))
+        )
+      : undefined) as BriefContext["finance"],
   };
 
   if (type === "weekly") {
@@ -701,6 +745,26 @@ function buildBriefUserPrompt(ctx: BriefContext, localTime: string): string {
     for (const a of ctx.flaggedAvoidance) {
       lines.push(`- ${a.title} (flagged ${a.days_flagged}d)`);
     }
+  }
+
+  if (ctx.finance) {
+    const f = ctx.finance;
+    const fmt = (n: number) =>
+      n.toLocaleString("en-US", {
+        style: "currency",
+        currency: "USD",
+        maximumFractionDigits: 0,
+      });
+    lines.push("", "FINANCE SNAPSHOT (Plaid):");
+    lines.push(
+      `- Cash on hand: ${fmt(f.cashTotal)} · Debt remaining: ${fmt(f.debtTotal)} · Net liquid: ${fmt(f.netLiquid)}`
+    );
+    lines.push(
+      `- Debt payoff progress: ${fmt(f.debtPaidOff)} of ${fmt(f.debtBaseline)} (${(f.debtPctPaid * 100).toFixed(1)}%)`
+    );
+    lines.push(
+      `- 30-day flow: +${fmt(f.income30d)} in / -${fmt(f.burn30d)} out → net ${f.netFlow30d >= 0 ? "+" : ""}${fmt(f.netFlow30d)}`
+    );
   }
 
   if (ctx.business) {
