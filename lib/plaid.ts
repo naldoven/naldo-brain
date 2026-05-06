@@ -3,7 +3,9 @@
  *
  * - Single-user MVP: PLAID_CLIENT_ID / PLAID_SECRET / PLAID_ENV / PLAID_OWNER_USER_ID env vars
  * - Sandbox / Development / Production env switch via PLAID_ENV
- * - access_tokens stored plaintext in plaid_items for v1 — TODO encrypt at rest
+ * - access_tokens encrypted at rest with AES-256-GCM via lib/crypto.ts
+ *   (PLAID_TOKEN_ENCRYPTION_KEY env var). Pre-encryption rows are
+ *   lazily migrated on next sync.
  * - Sync uses /transactions/sync (cursor-incremental) so re-runs are cheap
  *
  * Naldo's $55K business debt baseline lives in PLAID_DEBT_BASELINE_USD; the
@@ -20,6 +22,7 @@ import {
   type RemovedTransaction,
 } from "plaid";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { encryptToken, decryptToken, isEncrypted } from "@/lib/crypto";
 
 // ---- Client construction --------------------------------------------------
 
@@ -100,6 +103,9 @@ export async function exchangePublicToken(
     // Non-fatal — we'll still save the item without the pretty label.
   }
 
+  // Encrypt before storing — PLAID_TOKEN_ENCRYPTION_KEY must be set.
+  const accessTokenAtRest = encryptToken(accessToken);
+
   // Upsert the item
   const { data: existing } = await supabase
     .from("plaid_items")
@@ -113,7 +119,7 @@ export async function exchangePublicToken(
     const { data: updated } = await supabase
       .from("plaid_items")
       .update({
-        access_token: accessToken,
+        access_token: accessTokenAtRest,
         institution_id: institutionId,
         institution_name: institutionName,
         status: "ok",
@@ -130,7 +136,7 @@ export async function exchangePublicToken(
       .insert({
         user_id: userId,
         external_item_id: externalItemId,
-        access_token: accessToken,
+        access_token: accessTokenAtRest,
         institution_id: institutionId,
         institution_name: institutionName,
       })
@@ -165,7 +171,10 @@ export async function disconnectItem(
 
   try {
     const client = getPlaidClient();
-    await client.itemRemove({ access_token: item.access_token });
+    // The stored value is encrypted (post-migration) or plaintext (legacy);
+    // decryptToken() handles both transparently.
+    const accessToken = decryptToken(item.access_token);
+    await client.itemRemove({ access_token: accessToken });
   } catch {
     // Even if remove fails upstream, delete locally so user isn't stuck.
   }
@@ -370,12 +379,55 @@ export async function syncFromPlaid(
     .eq("user_id", userId);
 
   for (const it of items ?? []) {
+    const stored = it.access_token as string;
+
+    // Lazy migration: if a row was created before encryption was wired up,
+    // it's plaintext. Encrypt and update the row in-place. We continue using
+    // the plaintext value for THIS run's API calls (avoids a useless extra
+    // decrypt round-trip). Subsequent runs will go through decryptToken.
+    let accessToken: string;
+    if (isEncrypted(stored)) {
+      try {
+        accessToken = decryptToken(stored);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`decrypt ${it.id}: ${msg}`);
+        await supabase
+          .from("plaid_items")
+          .update({
+            status: "error",
+            status_detail: `decrypt failed: ${msg}`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", it.id);
+        continue;
+      }
+    } else {
+      accessToken = stored;
+      try {
+        const encrypted = encryptToken(accessToken);
+        await supabase
+          .from("plaid_items")
+          .update({
+            access_token: encrypted,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", it.id);
+      } catch (err) {
+        // If encryption fails (missing key etc.), don't break the sync —
+        // just log and continue with plaintext for this run. The user will
+        // see the encryption error on the next request that uses the key.
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`encrypt ${it.id}: ${msg}`);
+      }
+    }
+
     // Refresh accounts
     const a = await syncAccountsForItem(
       supabase,
       userId,
       it.id as string,
-      it.access_token as string
+      accessToken
     );
     accountsSeen += a.accountsSeen;
     if (a.error) {
@@ -397,7 +449,7 @@ export async function syncFromPlaid(
       supabase,
       userId,
       it.id as string,
-      it.access_token as string,
+      accessToken,
       (it.transactions_cursor as string | null) ?? null
     );
     txAdded += t.added;
