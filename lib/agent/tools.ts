@@ -125,13 +125,18 @@ const createReminder: ToolDefinition = {
       };
     }
 
+    // Default fire_at to the next 6:20 AM in Naldo's tz when the LLM didn't
+    // give us one — better than leaving fire_at NULL (the cron will never
+    // pick it up). 6:20 AM is intentional: 10 min before the morning brief.
+    const fireAt = input.fire_at ?? defaultFireAt();
+
     const { data, error } = await ctx.supabase
       .from("reminders")
       .insert({
         user_id: ctx.userId,
         title: input.title,
         description: input.description ?? null,
-        fire_at: input.fire_at ?? null,
+        fire_at: fireAt,
         rrule: input.rrule ?? null,
         channels: input.channels,
         priority: input.priority,
@@ -144,12 +149,11 @@ const createReminder: ToolDefinition = {
     if (error) return { ok: false, summary: `DB error: ${error.message}` };
 
     const recurrence = input.rrule ? "recurring" : "one-time";
-    const when = input.fire_at
-      ? new Date(input.fire_at).toLocaleString("en-US", {
-          dateStyle: "medium",
-          timeStyle: "short",
-        })
-      : "no scheduled time";
+    const when = new Date(fireAt).toLocaleString("en-US", {
+      timeZone: "America/New_York",
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
 
     return {
       ok: true,
@@ -158,6 +162,43 @@ const createReminder: ToolDefinition = {
     };
   },
 };
+
+/**
+ * Returns ISO 8601 for "next 6:20 AM in America/New_York". If we're already
+ * past 6:20 today, rolls to tomorrow. Used when the LLM doesn't give us a
+ * specific fire_at — better than NULL (which the cron would never fire).
+ */
+function defaultFireAt(): string {
+  const tz = "America/New_York";
+  const now = new Date();
+
+  // Get today's date in tz to construct 6:20 AM in that local day.
+  const ymd = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+
+  // Probe noon UTC of `ymd`, derive its hour-in-tz, walk back to tz midnight.
+  const probe = new Date(`${ymd}T12:00:00Z`);
+  const tzHour = parseInt(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hour: "numeric",
+      hour12: false,
+    }).format(probe),
+    10
+  );
+  const tzMidnight = new Date(probe.getTime() - tzHour * 3_600_000);
+  let target = new Date(tzMidnight.getTime() + 6 * 3_600_000 + 20 * 60_000);
+
+  // If 6:20 has already passed today, push to tomorrow
+  if (target.getTime() <= now.getTime()) {
+    target = new Date(target.getTime() + 24 * 3_600_000);
+  }
+  return target.toISOString();
+}
 
 // ============================================================================
 // create_task
