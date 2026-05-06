@@ -95,10 +95,7 @@ export async function getGmailForAccount(
       .eq("id", account.id);
   });
 
-  // Cast: @googleapis/gmail and our google-auth-library import share runtime
-  // behavior but TS sees different OAuth2Client types from peer-dep mismatch.
-  // Same pattern lib/google-calendar.ts uses.
-  return gmailApi({ version: "v1", auth: oauth2 as never });
+  return gmailApi({ version: "v1", auth: oauth2 });
 }
 
 // ----------------------------------------------------------------------------
