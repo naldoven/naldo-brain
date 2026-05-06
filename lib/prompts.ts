@@ -11,6 +11,29 @@ export const NALDOS_GOALS = `
 - Buy an engagement ring (savings)
 `.trim();
 
+/**
+ * YLL is heavily seasonal — most revenue lands in Q4 (holiday lighting installs
+ * Nov–Jan). Don't naively project EOY revenue from a year-to-date daily
+ * run-rate; that's mathematically wrong for this business. Use this in the
+ * brief LLM prompt so Claude reasons about cadence correctly.
+ */
+export const YLL_SEASONALITY_NOTE = `
+YLL revenue is heavily seasonal — most deals close Oct–Jan (holiday lighting
+installs are the bulk of revenue). May–Aug is the off-season for booking
+and revenue, used for quotes, proposals, permanent-lighting jobs, and
+event/wedding work.
+
+When evaluating progress vs the $500K target, do NOT extrapolate the daily
+run-rate linearly to a year-end projection — that math systematically
+under-projects in Jan–Sep and over-projects in Nov–Dec. Instead, look at
+pipeline value (open deals × historical close rate) and the count + value
+of in-flight Christmas Lights opportunities for the upcoming season.
+
+If revenue YTD looks "low" relative to target before October, that's
+expected; flag urgency only if pipeline is also low. After October, daily
+revenue cadence becomes a meaningful signal.
+`.trim();
+
 type Memory = { subject: string; fact: string };
 
 type BuildOpts = {

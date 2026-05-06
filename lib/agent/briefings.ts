@@ -6,7 +6,7 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { NALDOS_GOALS } from "@/lib/prompts";
+import { NALDOS_GOALS, YLL_SEASONALITY_NOTE } from "@/lib/prompts";
 import { HEALTH_GOALS } from "@/lib/health";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -616,6 +616,9 @@ function buildBriefSystemPrompt(type: BriefType): string {
 
 NALDO'S 2026 GOALS:
 ${NALDOS_GOALS}
+
+YLL BUSINESS CONTEXT:
+${YLL_SEASONALITY_NOTE}
 
 Format guidelines:
 - Use emojis sparingly: 🌅 morning, 🌙 evening, 📅 weekly, 🎯 monthly, ✅ wins, 🤔 pushback
