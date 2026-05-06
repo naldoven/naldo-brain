@@ -19,6 +19,13 @@ import {
   sendWhatsAppMessage,
   isTwilioConfigured,
 } from "@/lib/twilio";
+import {
+  parseButtonPayload,
+  parseTextActionReply,
+  handleReminderAction,
+  findRecentlyFiredReminder,
+  type ActionId,
+} from "@/lib/reminders/actions";
 
 export const runtime = "nodejs";
 
@@ -104,7 +111,43 @@ export async function POST(request: NextRequest) {
 
   const userId = profile.id;
 
-  // 6. Persist incoming message right away (so it shows in chat history even if agent is slow)
+  // 6. Reminder ack short-circuit — runs BEFORE the agent loop so a tap on
+  //    Done/1h/Tomorrow never burns a Claude turn.
+  //    (a) Twilio quick-reply button → ButtonPayload form field carries
+  //        "<action>:<reminder_id>" exactly as we set in the Content Template.
+  //    (b) Plain text "done" / "1h" / "tomorrow" → match against the most
+  //        recently fired reminder (within 12h). Works even before the
+  //        Content Template is set up.
+  const buttonPayload = (params.ButtonPayload ?? "").trim();
+  const buttonText = (params.ButtonText ?? "").trim();
+  const reminderAck = await maybeHandleReminderAck({
+    supabase,
+    userId,
+    phone,
+    buttonPayload,
+    buttonText,
+    userMessage,
+  });
+  if (reminderAck.handled) {
+    // Persist the ack as a normal chat turn for history continuity, then bail.
+    await supabase.from("chat_messages").insert({
+      user_id: userId,
+      role: "user",
+      content: reminderAck.userMessageForLog || userMessage || "(button tap)",
+      channel: "whatsapp",
+    });
+    if (reminderAck.confirmation) {
+      await supabase.from("chat_messages").insert({
+        user_id: userId,
+        role: "assistant",
+        content: reminderAck.confirmation,
+        channel: "whatsapp",
+      });
+    }
+    return twimlResponse();
+  }
+
+  // 7. Persist incoming message right away (so it shows in chat history even if agent is slow)
   if (userMessage || numMedia > 0) {
     await supabase.from("chat_messages").insert({
       user_id: userId,
@@ -118,7 +161,7 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // 7. Async: run agent + send reply (don't block the TwiML response)
+  // 8. Async: run agent + send reply (don't block the TwiML response)
   // Render keeps the Node process alive between requests, so fire-and-forget is OK here.
   void processIncomingAsync({
     supabase,
@@ -144,6 +187,88 @@ function collectMediaUrls(
     out.push({ url, contentType: params[`MediaContentType${i}`] ?? "" });
   }
   return out;
+}
+
+/**
+ * Detect + execute a reminder ack (button tap or plain-text reply).
+ *
+ * Returns:
+ *   - { handled: true, confirmation } when we ran an action and replied
+ *   - { handled: false } when this isn't a reminder ack — caller falls
+ *     through to the normal agent loop
+ */
+async function maybeHandleReminderAck(opts: {
+  supabase: ReturnType<typeof createServerClient>;
+  userId: string;
+  phone: string;
+  buttonPayload: string;
+  buttonText: string;
+  userMessage: string;
+}): Promise<
+  | { handled: true; confirmation: string | null; userMessageForLog: string }
+  | { handled: false }
+> {
+  const { supabase, userId, phone, buttonPayload, buttonText, userMessage } =
+    opts;
+
+  // Path A: Twilio button tap. ButtonPayload is exactly the id we set in the
+  // Content Template ("done:<reminderId>" etc.).
+  if (buttonPayload) {
+    const parsed = parseButtonPayload(buttonPayload);
+    if (parsed) {
+      const confirmation = await handleReminderAction({
+        supabase,
+        userId,
+        reminderId: parsed.reminderId,
+        action: parsed.action,
+      });
+      if (confirmation) {
+        try {
+          await sendWhatsAppMessage({ to: phone, body: confirmation });
+        } catch (err) {
+          console.error("[whatsapp] reminder ack reply failed:", err);
+        }
+        return {
+          handled: true,
+          confirmation,
+          userMessageForLog: buttonText || `(tapped: ${parsed.action})`,
+        };
+      }
+    }
+  }
+
+  // Path B: plain-text reply ("done", "1h", "tomorrow", etc.). Match against
+  // the most recent reminder fired in the last 12h.
+  if (userMessage) {
+    const action: ActionId | null = parseTextActionReply(userMessage);
+    if (action) {
+      const recent = await findRecentlyFiredReminder(supabase, userId);
+      if (recent) {
+        const confirmation = await handleReminderAction({
+          supabase,
+          userId,
+          reminderId: recent.id,
+          action,
+        });
+        if (confirmation) {
+          try {
+            await sendWhatsAppMessage({ to: phone, body: confirmation });
+          } catch (err) {
+            console.error("[whatsapp] reminder ack reply failed:", err);
+          }
+          return {
+            handled: true,
+            confirmation,
+            userMessageForLog: userMessage,
+          };
+        }
+      }
+      // No recent reminder to apply this to — fall through to agent so it can
+      // ask "done with what?" or similar.
+    }
+  }
+
+  return { handled: false };
 }
 
 async function processIncomingAsync(opts: {

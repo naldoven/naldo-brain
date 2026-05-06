@@ -22,6 +22,11 @@ export function getFromNumber(): string {
   return `whatsapp:${TWILIO_WHATSAPP_NUMBER.replace(/\s+/g, "")}`;
 }
 
+function formatWhatsAppRecipient(to: string): string {
+  const cleaned = to.replace(/\s+/g, "");
+  return cleaned.startsWith("whatsapp:") ? cleaned : `whatsapp:${cleaned}`;
+}
+
 export async function sendWhatsAppMessage({
   to,
   body,
@@ -30,15 +35,38 @@ export async function sendWhatsAppMessage({
   body: string;
 }) {
   const client = getTwilioClient();
-  const cleanedTo = to.replace(/\s+/g, "");
-  const toFormatted = cleanedTo.startsWith("whatsapp:")
-    ? cleanedTo
-    : `whatsapp:${cleanedTo}`;
-
   return client.messages.create({
     from: getFromNumber(),
-    to: toFormatted,
+    to: formatWhatsAppRecipient(to),
     body,
+  });
+}
+
+/**
+ * Send an interactive WhatsApp message via a Twilio Content Template (HXxxx...).
+ *
+ * Used by the reminder cron to render Quick Reply buttons (Done / 1h / Tomorrow).
+ * The template lives in Twilio Console → Content Builder; pass its `contentSid`
+ * here and a map of variable values matching the {{1}}, {{2}}, ... placeholders.
+ *
+ * On WhatsApp the user can tap a button (we get `ButtonPayload` on the inbound
+ * webhook) OR just type a reply (handled as plain text).
+ */
+export async function sendWhatsAppContentTemplate({
+  to,
+  contentSid,
+  variables,
+}: {
+  to: string;
+  contentSid: string;
+  variables: Record<string, string>;
+}) {
+  const client = getTwilioClient();
+  return client.messages.create({
+    from: getFromNumber(),
+    to: formatWhatsAppRecipient(to),
+    contentSid,
+    contentVariables: JSON.stringify(variables),
   });
 }
 

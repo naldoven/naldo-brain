@@ -1,6 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
-import { sendWhatsAppMessage, isTwilioConfigured } from "@/lib/twilio";
+import {
+  sendWhatsAppMessage,
+  sendWhatsAppContentTemplate,
+  isTwilioConfigured,
+} from "@/lib/twilio";
 import { computeNextFire, formatReminderMessage } from "@/lib/rrule-helpers";
 
 export const runtime = "nodejs";
@@ -109,7 +113,26 @@ export async function POST(request: NextRequest) {
         description: r.description,
         emoji: r.emoji,
       });
-      await sendWhatsAppMessage({ to: phone, body });
+
+      // Quick Reply Content Template if available — gives "Done / 1h / Tomorrow"
+      // buttons in WhatsApp. Otherwise plain text with manual instructions so
+      // the user can still type "done" / "1h" / "tomorrow" to ack.
+      const templateSid = process.env.TWILIO_REMINDER_TEMPLATE_SID;
+      if (templateSid) {
+        await sendWhatsAppContentTemplate({
+          to: phone,
+          contentSid: templateSid,
+          variables: {
+            "1": body,           // body text — wired to {{1}} in the template
+            "2": r.id,           // reminder id — wired into each button payload as {{2}}
+          },
+        });
+      } else {
+        await sendWhatsAppMessage({
+          to: phone,
+          body: `${body}\n\nReply *done*, *1h*, or *tomorrow*.`,
+        });
+      }
       await supabase.from("reminder_logs").insert({
         reminder_id: r.id,
         user_id: r.user_id,
