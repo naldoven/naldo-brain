@@ -2,7 +2,16 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { Calendar, CheckCircle, XCircle, Loader2, Plug, Wallet } from "lucide-react";
+import {
+  Calendar,
+  CheckCircle,
+  XCircle,
+  Loader2,
+  Plug,
+  Wallet,
+  Briefcase,
+  RefreshCw,
+} from "lucide-react";
 import { toast } from "sonner";
 import { usePlaidLink } from "react-plaid-link";
 
@@ -21,12 +30,21 @@ type PlaidItem = {
   last_synced_at: string | null;
 };
 
+type GhlState = {
+  configured: boolean;
+  opportunityCount: number;
+  lastSyncedAt: string | null;
+};
+
 type Props = {
   googleCalendar: GoogleConnection | null;
   plaidItems: PlaidItem[];
+  ghl: GhlState;
 };
 
-export function IntegrationsView({ googleCalendar, plaidItems }: Props) {
+type SyncKind = "google_calendar" | "ghl" | "plaid";
+
+export function IntegrationsView({ googleCalendar, plaidItems, ghl }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [disconnecting, setDisconnecting] = useState(false);
@@ -62,6 +80,42 @@ export function IntegrationsView({ googleCalendar, plaidItems }: Props) {
     }
     toast.success("Disconnected");
     router.refresh();
+  }
+
+  // ---- Sync now (shared) -------------------------------------------------
+  const [syncing, setSyncing] = useState<SyncKind | null>(null);
+
+  async function syncNow(kind: SyncKind, label: string) {
+    setSyncing(kind);
+    const t0 = Date.now();
+    try {
+      const res = await fetch("/api/integrations/sync-now", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(`${label}: ${data.error ?? "sync failed"}`);
+        return;
+      }
+      // Each lib returns slightly different shapes — render whatever's most useful.
+      let summary = "";
+      if (kind === "google_calendar") {
+        summary = `${data.pulled ?? 0} pulled · ${data.deleted ?? 0} removed`;
+      } else if (kind === "ghl") {
+        summary = `${data.opportunities ?? 0} deals · ${data.pipelines ?? 0} pipelines`;
+      } else if (kind === "plaid") {
+        summary = `${data.accountsSeen ?? 0} accounts · +${data.transactionsAdded ?? 0} tx`;
+      }
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      toast.success(`${label}: ${summary} (${elapsed}s)`);
+      router.refresh();
+    } catch {
+      toast.error(`${label}: couldn't reach server`);
+    } finally {
+      setSyncing(null);
+    }
   }
 
   // ---- Plaid -------------------------------------------------------------
@@ -197,14 +251,28 @@ export function IntegrationsView({ googleCalendar, plaidItems }: Props) {
           )}
 
           {googleCalendar ? (
-            <button
-              onClick={disconnectGoogle}
-              disabled={disconnecting}
-              className="w-full py-2 rounded-lg text-sm font-semibold bg-red-500/20 hover:bg-red-500/30 text-red-300 disabled:opacity-50 flex items-center justify-center gap-2"
-            >
-              {disconnecting && <Loader2 className="size-3.5 animate-spin" />}
-              Disconnect
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => syncNow("google_calendar", "Google Calendar")}
+                disabled={syncing !== null}
+                className="flex-1 py-2 rounded-lg text-sm font-semibold bg-white/5 hover:bg-white/10 text-zinc-200 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {syncing === "google_calendar" ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5" />
+                )}
+                Sync now
+              </button>
+              <button
+                onClick={disconnectGoogle}
+                disabled={disconnecting}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-red-500/20 hover:bg-red-500/30 text-red-300 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {disconnecting && <Loader2 className="size-3.5 animate-spin" />}
+                Disconnect
+              </button>
+            </div>
           ) : (
             <a
               href="/api/auth/google/calendar/start"
@@ -274,17 +342,99 @@ export function IntegrationsView({ googleCalendar, plaidItems }: Props) {
             </div>
           )}
 
-          <button
-            onClick={requestPlaidLinkToken}
-            disabled={plaidLoading || (plaidLinkToken !== null && !plaidReady)}
-            className="w-full py-2 rounded-lg text-sm font-semibold brand-gradient text-white flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            {(plaidLoading || (plaidLinkToken !== null && !plaidReady)) && (
-              <Loader2 className="size-3.5 animate-spin" />
+          <div className="flex gap-2">
+            {plaidItems.length > 0 && (
+              <button
+                onClick={() => syncNow("plaid", "Plaid")}
+                disabled={syncing !== null}
+                className="flex-1 py-2 rounded-lg text-sm font-semibold bg-white/5 hover:bg-white/10 text-zinc-200 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {syncing === "plaid" ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5" />
+                )}
+                Sync now
+              </button>
             )}
-            <Plug className="size-4" />{" "}
-            {plaidItems.length > 0 ? "Connect another account" : "Connect a bank account"}
-          </button>
+            <button
+              onClick={requestPlaidLinkToken}
+              disabled={plaidLoading || (plaidLinkToken !== null && !plaidReady)}
+              className={`${
+                plaidItems.length > 0 ? "flex-1" : "w-full"
+              } py-2 rounded-lg text-sm font-semibold brand-gradient text-white flex items-center justify-center gap-2 disabled:opacity-50`}
+            >
+              {(plaidLoading || (plaidLinkToken !== null && !plaidReady)) && (
+                <Loader2 className="size-3.5 animate-spin" />
+              )}
+              <Plug className="size-4" />{" "}
+              {plaidItems.length > 0 ? "Connect another" : "Connect a bank"}
+            </button>
+          </div>
+        </div>
+
+        {/* GoHighLevel — env-configured, no UI flow but exposes Sync now */}
+        <div className="glass-strong rounded-2xl p-5">
+          <div className="flex items-start gap-3 mb-3">
+            <div className="size-10 rounded-lg bg-amber-500/20 flex items-center justify-center text-amber-400">
+              <Briefcase className="size-5" />
+            </div>
+            <div className="flex-1">
+              <h3 className="font-bold">GoHighLevel</h3>
+              <p className="text-xs text-zinc-400">
+                YLL pipeline + opportunities. Configured server-side via{" "}
+                <code className="text-[10px]">GHL_API_KEY</code> +{" "}
+                <code className="text-[10px]">GHL_LOCATION_ID</code>.
+              </p>
+            </div>
+            {ghl.configured ? (
+              <span className="badge text-xs px-2 py-1 rounded-full bg-amber-500/20 text-amber-300 flex items-center gap-1">
+                <CheckCircle className="size-3" /> Configured
+              </span>
+            ) : (
+              <span className="badge text-xs px-2 py-1 rounded-full bg-zinc-500/20 text-zinc-400 flex items-center gap-1">
+                <XCircle className="size-3" /> Set env vars
+              </span>
+            )}
+          </div>
+
+          {ghl.configured && (
+            <div className="bg-white/5 rounded-lg p-3 text-xs space-y-1 mb-3">
+              <div>
+                <span className="text-zinc-400">Opportunities mirrored:</span>{" "}
+                <span className="font-semibold">{ghl.opportunityCount}</span>
+              </div>
+              <div>
+                <span className="text-zinc-400">Last synced:</span>{" "}
+                <span className="font-semibold">
+                  {ghl.lastSyncedAt
+                    ? new Date(ghl.lastSyncedAt).toLocaleString()
+                    : "Never (waiting for next 30-min cron)"}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {ghl.configured ? (
+            <button
+              onClick={() => syncNow("ghl", "GoHighLevel")}
+              disabled={syncing !== null}
+              className="w-full py-2 rounded-lg text-sm font-semibold bg-white/5 hover:bg-white/10 text-zinc-200 disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {syncing === "ghl" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+              Sync now
+            </button>
+          ) : (
+            <p className="text-[11px] text-zinc-500 text-center py-1">
+              Set <code>GHL_API_KEY</code>, <code>GHL_LOCATION_ID</code>, and{" "}
+              <code>GHL_OWNER_USER_ID</code> on Render. See{" "}
+              <code>PHASE3-PROGRESS.md</code> for full setup.
+            </p>
+          )}
         </div>
       </div>
     </div>

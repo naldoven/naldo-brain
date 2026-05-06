@@ -22,6 +22,16 @@ type ServiceLine = {
   progress: number;            // 0..1
 };
 
+type SavingsGoalLite = {
+  id: string;
+  name: string;
+  target_usd: number;
+  current_usd: number;
+  target_date: string | null;
+  emoji: string | null;
+  accent: string | null;
+};
+
 type Props = {
   revenueYtd: number;
   revenueTarget: number;
@@ -31,6 +41,7 @@ type Props = {
   hasFinanceData: boolean;
   serviceLines: ServiceLine[];
   daysToFulltime: number;
+  savingsGoals: SavingsGoalLite[];
 };
 
 const TZ = "America/New_York";
@@ -59,6 +70,7 @@ export function GoalsView({
   hasFinanceData,
   serviceLines,
   daysToFulltime,
+  savingsGoals,
 }: Props) {
   const revenuePct = Math.min(1, revenueYtd / revenueTarget);
   const revenueRemaining = Math.max(0, revenueTarget - revenueYtd);
@@ -170,16 +182,78 @@ export function GoalsView({
       <h2 className="text-sm font-bold mt-8 mb-3 text-zinc-300 uppercase tracking-wider">
         Personal milestones
       </h2>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <PlaceholderGoal
-          icon={Home}
-          label="House down payment"
-          tip="Track when you set up a savings goal in /finance — coming soon"
-        />
-        <PlaceholderGoal
-          icon={Gem}
-          label="Engagement ring"
-          tip="Track when you set up a savings goal in /finance — coming soon"
+      {savingsGoals.length === 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <PlaceholderGoal
+            icon={Home}
+            label="House down payment"
+            tip="Add a savings goal in /finance to track this here."
+          />
+          <PlaceholderGoal
+            icon={Gem}
+            label="Engagement ring"
+            tip="Add a savings goal in /finance to track this here."
+          />
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {savingsGoals.map((g) => (
+            <SavingsCard key={g.id} goal={g} />
+          ))}
+        </div>
+      )}
+      <p className="text-[11px] text-zinc-500 mt-2 ml-1">
+        <Link href="/finance" className="hover:text-zinc-300">
+          Manage savings goals on /finance →
+        </Link>
+      </p>
+    </div>
+  );
+}
+
+function SavingsCard({ goal }: { goal: SavingsGoalLite }) {
+  const target = Number(goal.target_usd) || 0;
+  const current = Number(goal.current_usd) || 0;
+  const pct = target > 0 ? Math.max(0, Math.min(1, current / target)) : 0;
+  const remaining = Math.max(0, target - current);
+  const accent =
+    goal.accent === "amber"
+      ? "from-amber-400 via-orange-500 to-rose-500"
+      : goal.accent === "rose"
+      ? "from-rose-500 via-pink-500 to-purple-500"
+      : goal.accent === "emerald"
+      ? "from-emerald-500 via-cyan-500 to-blue-500"
+      : goal.accent === "purple"
+      ? "from-purple-500 via-fuchsia-500 to-pink-500"
+      : goal.accent === "cyan"
+      ? "from-cyan-400 via-sky-500 to-indigo-500"
+      : "from-indigo-500 via-purple-500 to-pink-500";
+
+  return (
+    <div className="glass rounded-2xl p-4 border border-white/10">
+      <div className="flex items-center gap-2 text-xs text-zinc-300 mb-2">
+        <span className="text-base leading-none">{goal.emoji ?? "💰"}</span>
+        <span className="truncate">{goal.name}</span>
+      </div>
+      <div className="text-2xl font-bold">
+        ${current.toLocaleString("en-US", { maximumFractionDigits: 0 })}
+        <span className="text-zinc-500 font-normal text-base">
+          {" "}
+          / ${target.toLocaleString("en-US", { maximumFractionDigits: 0 })}
+        </span>
+      </div>
+      <div className="text-[11px] text-zinc-400 mb-2">
+        {current >= target
+          ? `🎉 ${(pct * 100).toFixed(0)}% — funded`
+          : `${(pct * 100).toFixed(0)}% · $${remaining.toLocaleString("en-US", {
+              maximumFractionDigits: 0,
+            })} to go`}
+        {goal.target_date ? ` · target ${goal.target_date}` : ""}
+      </div>
+      <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+        <div
+          className={`h-full bg-gradient-to-r ${accent}`}
+          style={{ width: `${pct * 100}%` }}
         />
       </div>
     </div>

@@ -44,8 +44,13 @@ export default async function GoalsPage() {
     .toISOString()
     .slice(0, 10);
 
-  const [ghlYtdWonRes, ghlOpenRes, plaidAccountsRes, plaidTxRes] =
-    await Promise.all([
+  const [
+    ghlYtdWonRes,
+    ghlOpenRes,
+    plaidAccountsRes,
+    plaidTxRes,
+    savingsRes,
+  ] = await Promise.all([
       supabase
         .from("gohighlevel_opportunities")
         .select("monetary_value, ghl_status_changed_at, ghl_updated_at, pipeline_name")
@@ -69,6 +74,13 @@ export default async function GoalsPage() {
         .eq("user_id", user.id)
         .gte("date", thirtyDaysAgo)
         .limit(5000),
+      supabase
+        .from("savings_goals")
+        .select("id, name, target_usd, current_usd, target_date, emoji, accent")
+        .eq("user_id", user.id)
+        .eq("archived", false)
+        .order("position")
+        .order("created_at"),
     ]);
 
   const ghlYtdWon = (ghlYtdWonRes.data ?? []) as Array<{
@@ -132,6 +144,16 @@ export default async function GoalsPage() {
     Math.ceil((YLL_FULLTIME_TARGET.getTime() - Date.now()) / 86400000)
   );
 
+  const savingsGoals = (savingsRes.data ?? []) as Array<{
+    id: string;
+    name: string;
+    target_usd: number;
+    current_usd: number;
+    target_date: string | null;
+    emoji: string | null;
+    accent: string | null;
+  }>;
+
   return (
     <GoalsView
       revenueYtd={revenueYtd}
@@ -142,6 +164,7 @@ export default async function GoalsPage() {
       hasFinanceData={finance !== null}
       serviceLines={serviceLines}
       daysToFulltime={daysToFulltime}
+      savingsGoals={savingsGoals}
     />
   );
 }

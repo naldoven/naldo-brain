@@ -51,7 +51,7 @@ export default async function FinancePage() {
     .toISOString()
     .slice(0, 10);
 
-  const [itemsRes, accountsRes, txRes] = await Promise.all([
+  const [itemsRes, accountsRes, txRes, savingsRes] = await Promise.all([
     supabase
       .from("plaid_items")
       .select("id, institution_name, status, status_detail, last_synced_at")
@@ -74,11 +74,29 @@ export default async function FinancePage() {
       .gte("date", thirtyDaysAgo)
       .order("date", { ascending: false })
       .limit(200),
+    supabase
+      .from("savings_goals")
+      .select("id, name, target_usd, current_usd, target_date, emoji, accent, archived, completed_at")
+      .eq("user_id", user.id)
+      .eq("archived", false)
+      .order("position")
+      .order("created_at"),
   ]);
 
   const items = (itemsRes.data ?? []) as ItemRow[];
   const accounts = (accountsRes.data ?? []) as AccountRow[];
   const transactions = (txRes.data ?? []) as TxRow[];
+  const savings = (savingsRes.data ?? []) as Array<{
+    id: string;
+    name: string;
+    target_usd: number;
+    current_usd: number;
+    target_date: string | null;
+    emoji: string | null;
+    accent: string | null;
+    archived: boolean;
+    completed_at: string | null;
+  }>;
 
   const snapshot = summarizeFinance(
     accounts.map((a) => ({
@@ -97,6 +115,7 @@ export default async function FinancePage() {
       transactions={transactions}
       snapshot={snapshot}
       debtBaseline={DEBT_BASELINE_USD}
+      savingsGoals={savings}
     />
   );
 }

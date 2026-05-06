@@ -11,6 +11,7 @@ import {
   ArrowUpRight,
 } from "lucide-react";
 import type { FinanceSnapshot } from "@/lib/plaid";
+import { SavingsGoals, type SavingsGoal } from "@/components/savings-goals";
 
 type Item = {
   id: string;
@@ -54,6 +55,7 @@ type Props = {
   transactions: Transaction[];
   snapshot: FinanceSnapshot;
   debtBaseline: number;
+  savingsGoals: SavingsGoal[];
 };
 
 const TZ = "America/New_York";
@@ -85,6 +87,7 @@ export function FinanceView({
   transactions,
   snapshot,
   debtBaseline,
+  savingsGoals,
 }: Props) {
   const cashAccounts = accounts.filter(
     (a) => a.type === "depository" && a.is_active !== false
@@ -281,6 +284,11 @@ export function FinanceView({
             </div>
           )}
         </div>
+      </div>
+
+      {/* Savings goals */}
+      <div className="mt-6">
+        <SavingsGoals goals={savingsGoals} />
       </div>
 
       {/* Connection status footer */}
