@@ -10,7 +10,9 @@ type Reminder = {
   description: string | null;
   fire_at: string | null;
   rrule: string | null;
-  status: "active" | "completed" | "cancelled" | "snoozed";
+  // 'fired' = one-off that has fired, awaiting your tap on Done.
+  // 'completed' = explicitly marked done (button tap or "done" reply).
+  status: "active" | "fired" | "completed" | "cancelled" | "snoozed";
   priority: "high" | "medium" | "low";
   channels: string[];
   tags: string[] | null;
@@ -31,6 +33,7 @@ const SORT_OPTIONS = [
 const FILTER_OPTIONS = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
+  { value: "fired", label: "Awaiting reply" },
   { value: "completed", label: "Completed" },
   { value: "recurring", label: "Recurring" },
 ];
@@ -44,9 +47,13 @@ export function RemindersView({ initialReminders }: Props) {
 
   const stats = useMemo(() => {
     return {
+      // "Active" = scheduled and not yet fired (or recurring on its way)
       active: reminders.filter((r) => r.status === "active").length,
-      recurring: reminders.filter((r) => !!r.rrule).length,
+      // "Awaiting" = fired but you never tapped Done — a real avoidance signal
+      awaiting: reminders.filter((r) => r.status === "fired").length,
+      // "Completed" = you actually said done (button or "done" reply)
       completed: reminders.filter((r) => r.status === "completed").length,
+      // Total reminders ever created (so you can spot creation creep)
       total: reminders.length,
     };
   }, [reminders]);
@@ -62,6 +69,7 @@ export function RemindersView({ initialReminders }: Props) {
       );
     }
     if (filter === "active") list = list.filter((r) => r.status === "active");
+    else if (filter === "fired") list = list.filter((r) => r.status === "fired");
     else if (filter === "completed") list = list.filter((r) => r.status === "completed");
     else if (filter === "recurring") list = list.filter((r) => !!r.rrule);
 
@@ -114,10 +122,15 @@ export function RemindersView({ initialReminders }: Props) {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6">
-        <StatCard label="Active" value={stats.active} sub="Currently live" color="pink" />
-        <StatCard label="Recurring" value={stats.recurring} sub="Repeating" color="blue" />
-        <StatCard label="Completed" value={stats.completed} sub="Done successfully" color="cyan" />
-        <StatCard label="Total" value={stats.total} sub="Created overall" color="pink" />
+        <StatCard label="Active" value={stats.active} sub="Scheduled to fire" color="pink" />
+        <StatCard
+          label="Awaiting"
+          value={stats.awaiting}
+          sub={stats.awaiting > 0 ? "Fired, no reply" : "All caught up"}
+          color="amber"
+        />
+        <StatCard label="Completed" value={stats.completed} sub="Acked done" color="cyan" />
+        <StatCard label="Total" value={stats.total} sub="Created overall" color="blue" />
       </div>
 
       {/* Controls */}
@@ -202,10 +215,14 @@ function StatCard({
   label: string;
   value: number;
   sub: string;
-  color: "pink" | "blue" | "cyan";
+  color: "pink" | "blue" | "cyan" | "amber";
 }) {
-  const dot =
-    color === "pink" ? "text-pink-400" : color === "blue" ? "text-blue-400" : "text-cyan-400";
+  const dot = {
+    pink: "text-pink-400",
+    blue: "text-blue-400",
+    cyan: "text-cyan-400",
+    amber: "text-amber-400",
+  }[color];
   return (
     <div className="glass-strong rounded-2xl p-5 relative">
       <Bell className={`absolute top-3 right-3 size-4 ${dot}`} />
@@ -255,12 +272,14 @@ function ReminderRow({
         className={`text-xs px-2 py-1 rounded-full ${
           isDone
             ? "bg-cyan-500/20 text-cyan-300"
+            : reminder.status === "fired"
+            ? "bg-amber-500/20 text-amber-300"
             : reminder.status === "active"
             ? "bg-green-500/20 text-green-300"
             : "bg-zinc-500/20 text-zinc-300"
         }`}
       >
-        {reminder.status}
+        {reminder.status === "fired" ? "awaiting" : reminder.status}
       </span>
       {!isDone && (
         <button

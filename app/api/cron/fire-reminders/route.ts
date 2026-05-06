@@ -177,6 +177,8 @@ async function advanceReminder(
   const next = computeNextFire({ rrule: r.rrule, fireAt: r.fire_at, from: now });
 
   if (next) {
+    // Recurring — schedule next occurrence; status stays 'active' so it
+    // continues firing on schedule. Per-fire counts come from reminder_logs.
     await supabase
       .from("reminders")
       .update({
@@ -186,12 +188,14 @@ async function advanceReminder(
       })
       .eq("id", r.id);
   } else {
-    // No more occurrences — mark as completed
+    // One-off — fire happened, but the user hasn't acknowledged yet.
+    // 'fired' (not 'completed') so stats don't lie and Avoidance Radar
+    // can flag deals that fired N times without an ack.
     await supabase
       .from("reminders")
       .update({
         last_fired_at: now.toISOString(),
-        status: "completed",
+        status: "fired",
         updated_at: now.toISOString(),
       })
       .eq("id", r.id);
