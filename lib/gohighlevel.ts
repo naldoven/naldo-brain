@@ -104,88 +104,59 @@ export async function fetchPipelines(
 }
 
 /**
- * Page through every opportunity in a location. The Search endpoint paginates
- * via either `meta.startAfter` + `meta.startAfterId` or `meta.nextPageUrl` —
- * we honor whichever GHL returns. Hard-cap at 50 pages so a buggy cursor
- * loop can't melt the dyno.
+ * Page through every opportunity in a location. GHL v2 returns
+ * `{ opportunities, total, traceId }` — no cursor, no meta. Pagination is
+ * page-number based via the `page` param in the body. Hard-cap at 50 pages
+ * (= 5,000 opps) to keep this safe even if `total` is missing.
  */
 export async function fetchAllOpportunities(
   token: string,
   locationId: string,
   options: { pageSize?: number; updatedSince?: string } = {}
-): Promise<{ items: GhlOpportunity[]; lastMeta?: unknown; pages: number }> {
+): Promise<{ items: GhlOpportunity[]; lastMeta?: unknown; pages: number; total?: number }> {
   const pageSize = options.pageSize ?? 100;
   const out: GhlOpportunity[] = [];
   let lastMeta: unknown = undefined;
-  let pages = 0;
+  let pagesFetched = 0;
+  let totalFromApi: number | undefined;
 
-  let startAfter: string | null = null;
-  let startAfterId: string | null = null;
-  let nextUrl: string | null = null;
-
-  for (let page = 0; page < 50; page++) {
-    // GHL v2 uses `limit` (max 100), not `pageLimit` — the schema validator
-    // rejects unknown fields with a 422.
+  for (let page = 1; page <= 50; page++) {
     const body: Record<string, unknown> = {
       locationId,
       limit: pageSize,
+      page,
     };
     if (options.updatedSince) body.date = options.updatedSince;
-    if (startAfter) body.startAfter = startAfter;
-    if (startAfterId) body.startAfterId = startAfterId;
 
-    const path: string = nextUrl ?? "/opportunities/search";
-    const isCursorRequest = nextUrl !== null;
-    const res: GhlSearchResponse = await ghlFetch<GhlSearchResponse>(path, {
-      token,
-      method: isCursorRequest ? "GET" : "POST",
-      body: isCursorRequest ? undefined : JSON.stringify(body),
-    });
+    const res = (await ghlFetch<Record<string, unknown>>(
+      "/opportunities/search",
+      {
+        token,
+        method: "POST",
+        body: JSON.stringify(body),
+      }
+    )) as Record<string, unknown>;
 
-    const items = res.opportunities ?? [];
+    const items = (res.opportunities as GhlOpportunity[] | undefined) ?? [];
     if (items.length === 0) break;
     out.push(...items);
-    pages++;
+    pagesFetched++;
 
-    // Capture every top-level field GHL returns *except* opportunities
-    // (so we can spot where they actually put the pagination cursor).
-    const fullResp = res as unknown as Record<string, unknown>;
+    if (typeof res.total === "number") totalFromApi = res.total;
+
+    // Keep a peek at the top-level response shape for ongoing diagnostics
     const debugShape: Record<string, unknown> = {};
-    for (const key of Object.keys(fullResp)) {
-      if (key === "opportunities") {
-        debugShape[key] = `[${items.length} items]`;
-      } else {
-        debugShape[key] = fullResp[key];
-      }
+    for (const key of Object.keys(res)) {
+      debugShape[key] = key === "opportunities" ? `[${items.length} items]` : res[key];
     }
     lastMeta = debugShape;
 
-    const meta = (res.meta ?? {}) as Record<string, unknown>;
-
-    // Style 1: explicit next-page URL
-    if (typeof meta.nextPageUrl === "string" && meta.nextPageUrl) {
-      nextUrl = meta.nextPageUrl;
-      startAfter = null;
-      startAfterId = null;
-      continue;
-    }
-    // Style 2: cursor (startAfter + startAfterId — strings or numbers)
-    if (
-      meta.startAfter !== undefined &&
-      meta.startAfter !== null &&
-      meta.startAfterId !== undefined &&
-      meta.startAfterId !== null
-    ) {
-      nextUrl = null;
-      startAfter = String(meta.startAfter);
-      startAfterId = String(meta.startAfterId);
-      continue;
-    }
-    // No further cursor — done.
-    break;
+    // Stop conditions
+    if (items.length < pageSize) break;
+    if (typeof totalFromApi === "number" && out.length >= totalFromApi) break;
   }
 
-  return { items: out, lastMeta, pages };
+  return { items: out, lastMeta, pages: pagesFetched, total: totalFromApi };
 }
 
 // ---- Sync into local Postgres --------------------------------------------
@@ -201,6 +172,7 @@ export async function syncFromGhl(
   locationId: string
 ): Promise<{
   opportunities: number;
+  opportunitiesTotalAtSource?: number;
   pipelines: number;
   pages: number;
   lastMeta?: unknown;
@@ -246,11 +218,13 @@ export async function syncFromGhl(
   let opps: GhlOpportunity[] = [];
   let lastMeta: unknown = undefined;
   let pages = 0;
+  let totalFromApi: number | undefined;
   try {
     const result = await fetchAllOpportunities(token, locationId);
     opps = result.items;
     lastMeta = result.lastMeta;
     pages = result.pages;
+    totalFromApi = result.total;
   } catch (err) {
     errors.push(`fetchAllOpportunities: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -296,6 +270,7 @@ export async function syncFromGhl(
 
   return {
     opportunities: opps.length,
+    opportunitiesTotalAtSource: totalFromApi,
     pipelines: pipelines.length,
     pages,
     lastMeta,
