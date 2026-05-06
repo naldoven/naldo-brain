@@ -17,6 +17,7 @@ import {
   CheckSquare,
   Sparkles,
   Plug,
+  Inbox,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -40,6 +41,7 @@ const topGroup: NavItem[] = [
 
 const dailyGroup: NavItem[] = [
   { href: "/chat", label: "Chat with Brain", icon: MessageCircle },
+  { href: "/inbox", label: "Inbox", icon: Inbox },
   { href: "/reminders", label: "Reminders", icon: Bell },
   { href: "/calendar", label: "Calendar", icon: Calendar },
   { href: "/lists", label: "Lists", icon: ListChecks },
