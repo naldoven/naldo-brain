@@ -169,6 +169,12 @@ type ReminderRow = {
   fire_at: string | null;
 };
 
+// Memorae-style behavior: one-off reminders re-poll daily until you ack or
+// they hit the cap. Tap Done at any point and they stop. Hit the cap and the
+// avoidance auto-flagger picks them up as something you're dodging.
+const ONE_OFF_REFIRE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const ONE_OFF_MAX_FIRES = 5;
+
 async function advanceReminder(
   supabase: ReturnType<typeof createServerClient>,
   r: ReminderRow,
@@ -187,10 +193,38 @@ async function advanceReminder(
         updated_at: now.toISOString(),
       })
       .eq("id", r.id);
+    return;
+  }
+
+  // One-off — count how many times we've fired this in the last 30 days.
+  // The log row for THIS fire was already inserted before advanceReminder
+  // runs, so the count includes it.
+  const since = new Date(now.getTime() - 30 * 86400000).toISOString();
+  const { count: firedCount } = await supabase
+    .from("reminder_logs")
+    .select("*", { count: "exact", head: true })
+    .eq("reminder_id", r.id)
+    .eq("status", "sent")
+    .gte("fired_at", since);
+
+  const fires = firedCount ?? 1;
+
+  if (fires < ONE_OFF_MAX_FIRES) {
+    // Re-arm for tomorrow. Status stays 'active' so the cron picks it up
+    // at the new fire_at. The user can stop the cycle by tapping Done or
+    // Cancelled.
+    await supabase
+      .from("reminders")
+      .update({
+        last_fired_at: now.toISOString(),
+        fire_at: new Date(now.getTime() + ONE_OFF_REFIRE_INTERVAL_MS).toISOString(),
+        status: "active",
+        updated_at: now.toISOString(),
+      })
+      .eq("id", r.id);
   } else {
-    // One-off — fire happened, but the user hasn't acknowledged yet.
-    // 'fired' (not 'completed') so stats don't lie and Avoidance Radar
-    // can flag deals that fired N times without an ack.
+    // Capped — stop firing. Status='fired' is the avoidance signal: the
+    // hourly auto_flag_avoidance() will surface it on /avoidance.
     await supabase
       .from("reminders")
       .update({

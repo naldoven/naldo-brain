@@ -81,6 +81,50 @@ const createReminder: ToolDefinition = {
     }
     const input = parsed.data;
 
+    // Dedupe: if there's already an open reminder (active OR fired) with the
+    // same title, bump its fire_at + reset to active instead of inserting a
+    // new row. Naldo saying "remind me to call mom" three different days
+    // shouldn't create three rows.
+    const { data: existing } = await ctx.supabase
+      .from("reminders")
+      .select("id, title, status, fire_at, rrule")
+      .eq("user_id", ctx.userId)
+      .ilike("title", input.title)
+      .in("status", ["active", "fired"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existing) {
+      const updates: Record<string, unknown> = {
+        status: "active",
+        updated_at: new Date().toISOString(),
+      };
+      if (input.fire_at) updates.fire_at = input.fire_at;
+      if (input.rrule) updates.rrule = input.rrule;
+      if (input.description) updates.description = input.description;
+      if (input.emoji) updates.emoji = input.emoji;
+      updates.priority = input.priority;
+      updates.channels = input.channels;
+
+      await ctx.supabase
+        .from("reminders")
+        .update(updates)
+        .eq("id", existing.id);
+
+      const when = input.fire_at
+        ? new Date(input.fire_at).toLocaleString("en-US", {
+            dateStyle: "medium",
+            timeStyle: "short",
+          })
+        : "the existing schedule";
+      return {
+        ok: true,
+        summary: `Already had a reminder for "${existing.title}" — bumped it to fire at ${when}.`,
+        data: { reminder_id: existing.id, deduped: true },
+      };
+    }
+
     const { data, error } = await ctx.supabase
       .from("reminders")
       .insert({
