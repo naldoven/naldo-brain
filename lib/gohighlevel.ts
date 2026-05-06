@@ -147,8 +147,20 @@ export async function fetchAllOpportunities(
     out.push(...items);
     pages++;
 
+    // Capture every top-level field GHL returns *except* opportunities
+    // (so we can spot where they actually put the pagination cursor).
+    const fullResp = res as unknown as Record<string, unknown>;
+    const debugShape: Record<string, unknown> = {};
+    for (const key of Object.keys(fullResp)) {
+      if (key === "opportunities") {
+        debugShape[key] = `[${items.length} items]`;
+      } else {
+        debugShape[key] = fullResp[key];
+      }
+    }
+    lastMeta = debugShape;
+
     const meta = (res.meta ?? {}) as Record<string, unknown>;
-    lastMeta = meta;
 
     // Style 1: explicit next-page URL
     if (typeof meta.nextPageUrl === "string" && meta.nextPageUrl) {
