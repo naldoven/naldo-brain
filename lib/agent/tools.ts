@@ -1333,6 +1333,350 @@ const queryMetric: ToolDefinition = {
 };
 
 // ============================================================================
+// query_spending — "how much did I spend on Amazon last month?"
+// ============================================================================
+const QuerySpendingInput = z.object({
+  merchant: z
+    .string()
+    .min(1)
+    .max(80)
+    .describe("Merchant or transaction-name substring (case-insensitive). e.g. 'amazon', 'starbucks'.")
+    .optional(),
+  category: z
+    .string()
+    .min(1)
+    .max(80)
+    .describe("Plaid category top-level, e.g. 'Food and Drink', 'Travel', 'Shops'.")
+    .optional(),
+  window_days: z
+    .number()
+    .int()
+    .min(1)
+    .max(365)
+    .default(30)
+    .describe("Days back to look. Default 30. Use 7 for 'this week', 365 for 'this year'."),
+});
+
+const querySpending: ToolDefinition = {
+  schema: {
+    name: "query_spending",
+    description:
+      "Aggregate Plaid transactions by merchant or category over a window. Use when the user asks 'how much did I spend on X' or 'what did I spend on Y this month'. Always pass at least one of merchant or category.",
+    input_schema: {
+      type: "object",
+      properties: {
+        merchant: {
+          type: "string",
+          description: "Merchant name substring (case-insensitive)",
+        },
+        category: {
+          type: "string",
+          description: "Plaid top-level category",
+        },
+        window_days: {
+          type: "number",
+          description: "Days back. Default 30.",
+        },
+      },
+    },
+  },
+  async execute(rawInput, ctx) {
+    const parsed = QuerySpendingInput.safeParse(rawInput);
+    if (!parsed.success) {
+      return { ok: false, summary: `Invalid input: ${parsed.error.message}` };
+    }
+    const { merchant, category, window_days } = parsed.data;
+    if (!merchant && !category) {
+      return {
+        ok: false,
+        summary: "Pass either `merchant` or `category` (or both).",
+      };
+    }
+
+    const since = new Date(Date.now() - window_days * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+
+    let q = ctx.supabase
+      .from("plaid_transactions")
+      .select("amount, name, merchant_name, category, date")
+      .eq("user_id", ctx.userId)
+      .gte("date", since)
+      .gt("amount", 0)        // outflows only (Plaid: positive = money out)
+      .eq("pending", false);
+
+    if (merchant) {
+      // Search both merchant_name and name (Plaid sometimes only fills one).
+      q = q.or(
+        `merchant_name.ilike.%${merchant}%,name.ilike.%${merchant}%`
+      );
+    }
+
+    const { data, error } = await q.limit(2000);
+    if (error) return { ok: false, summary: `DB error: ${error.message}` };
+
+    const filtered = (data ?? []).filter((t) => {
+      if (!category) return true;
+      const cats = (t.category as string[] | null) ?? [];
+      return cats.some((c) => c.toLowerCase() === category.toLowerCase());
+    });
+
+    const total = filtered.reduce((s, t) => s + Number(t.amount), 0);
+    const count = filtered.length;
+    const label =
+      [merchant && `"${merchant}"`, category && `category "${category}"`]
+        .filter(Boolean)
+        .join(" + ") || "all spending";
+
+    if (count === 0) {
+      return {
+        ok: true,
+        summary: `No matching transactions for ${label} in the last ${window_days} days.`,
+      };
+    }
+
+    // Top 3 individual hits for color
+    const top = [...filtered]
+      .sort((a, b) => Number(b.amount) - Number(a.amount))
+      .slice(0, 3)
+      .map(
+        (t) =>
+          `${t.merchant_name ?? t.name ?? "(no name)"} ${new Date(t.date ?? "").toLocaleDateString(
+            "en-US",
+            { month: "short", day: "numeric" }
+          )} — $${Number(t.amount).toFixed(2)}`
+      )
+      .join("; ");
+
+    return {
+      ok: true,
+      summary: `${label} · last ${window_days}d: $${total.toFixed(2)} across ${count} ${count === 1 ? "transaction" : "transactions"}. Top: ${top}.`,
+      data: { total, count },
+    };
+  },
+};
+
+// ============================================================================
+// log_health_metric — "log my weight 195"
+// ============================================================================
+const HEALTH_METRIC_TYPES = [
+  "weight",
+  "body_fat_percent",
+  "lean_body_mass",
+  "body_temperature",
+  "steps",
+  "active_calories",
+  "exercise_minutes",
+  "heart_rate",
+  "resting_heart_rate",
+  "hrv_ms",
+  "systolic_bp",
+  "diastolic_bp",
+  "spo2",
+  "sleep_hours",
+  "workout_minutes",
+  "mindful_minutes",
+  "water_ml",
+] as const;
+
+const LogHealthMetricInput = z.object({
+  metric_type: z
+    .enum(HEALTH_METRIC_TYPES)
+    .describe(
+      "What is being logged. Use 'weight' (lbs), 'sleep_hours', 'workout_minutes', etc. See list."
+    ),
+  value: z.number().finite().describe("Numeric value. Convert if needed (e.g. 195 lbs)."),
+  unit: z
+    .string()
+    .max(16)
+    .describe("Unit string, e.g. 'lbs', 'kg', 'min', 'hr', 'count'.")
+    .optional(),
+  recorded_at: z
+    .string()
+    .datetime({ offset: true })
+    .describe("ISO 8601 timestamp of when the measurement was taken. Defaults to now.")
+    .optional(),
+});
+
+const logHealthMetric: ToolDefinition = {
+  schema: {
+    name: "log_health_metric",
+    description:
+      "Manually log a single health data point. Use for 'log my weight 195', 'I slept 7 hours', 'workout was 45 min'. Marks source='manual' so it doesn't conflict with Apple Health pushes.",
+    input_schema: {
+      type: "object",
+      properties: {
+        metric_type: {
+          type: "string",
+          enum: [...HEALTH_METRIC_TYPES],
+          description: "Which metric to log",
+        },
+        value: { type: "number", description: "Numeric value" },
+        unit: { type: "string", description: "Unit (lbs, kg, min, hr, count, bpm, ms)" },
+        recorded_at: {
+          type: "string",
+          description: "ISO 8601 timestamp; defaults to now",
+        },
+      },
+      required: ["metric_type", "value"],
+    },
+  },
+  async execute(rawInput, ctx) {
+    const parsed = LogHealthMetricInput.safeParse(rawInput);
+    if (!parsed.success) {
+      return { ok: false, summary: `Invalid input: ${parsed.error.message}` };
+    }
+    const input = parsed.data;
+    const recordedAt = input.recorded_at ?? new Date().toISOString();
+
+    // Sensible default unit per metric (matches lib/health.ts logic)
+    let unit = input.unit;
+    if (!unit) {
+      if (input.metric_type === "weight") unit = "lbs";
+      else if (input.metric_type === "sleep_hours") unit = "hr";
+      else if (input.metric_type.endsWith("_minutes")) unit = "min";
+      else if (
+        input.metric_type === "heart_rate" ||
+        input.metric_type === "resting_heart_rate"
+      )
+        unit = "bpm";
+      else if (input.metric_type === "hrv_ms") unit = "ms";
+      else if (input.metric_type === "steps") unit = "count";
+      else if (input.metric_type === "water_ml") unit = "ml";
+      else unit = "";
+    }
+
+    const { error } = await ctx.supabase.from("health_metrics").upsert(
+      {
+        user_id: ctx.userId,
+        metric_type: input.metric_type,
+        value: input.value,
+        unit: unit || null,
+        recorded_at: recordedAt,
+        source: "manual",
+      },
+      { onConflict: "user_id,metric_type,recorded_at,source" }
+    );
+
+    if (error) return { ok: false, summary: `DB error: ${error.message}` };
+
+    const valueStr = unit ? `${input.value} ${unit}` : `${input.value}`;
+    return {
+      ok: true,
+      summary: `✓ Logged ${input.metric_type.replace(/_/g, " ")}: ${valueStr}.`,
+    };
+  },
+};
+
+// ============================================================================
+// query_health_metric — "what was my weight a week ago?"
+// ============================================================================
+const QueryHealthMetricInput = z.object({
+  metric_type: z.enum(HEALTH_METRIC_TYPES),
+  window_days: z
+    .number()
+    .int()
+    .min(1)
+    .max(365)
+    .default(30)
+    .describe("How far back to look. Default 30 days."),
+  aggregation: z
+    .enum(["latest", "avg", "sum", "min", "max"])
+    .default("latest")
+    .describe(
+      "How to combine multi-sample metrics. 'latest' = most recent reading, 'sum' for steps/calories, 'avg' for HR/sleep."
+    ),
+});
+
+const queryHealthMetric: ToolDefinition = {
+  schema: {
+    name: "query_health_metric",
+    description:
+      "Read a health metric the user has logged. Use for 'what's my latest weight', 'average sleep this week', 'total steps last 7 days'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        metric_type: {
+          type: "string",
+          enum: [...HEALTH_METRIC_TYPES],
+          description: "Which metric to query",
+        },
+        window_days: { type: "number", description: "Days back. Default 30." },
+        aggregation: {
+          type: "string",
+          enum: ["latest", "avg", "sum", "min", "max"],
+          description: "Reduction across the window. Default 'latest'.",
+        },
+      },
+      required: ["metric_type"],
+    },
+  },
+  async execute(rawInput, ctx) {
+    const parsed = QueryHealthMetricInput.safeParse(rawInput);
+    if (!parsed.success) {
+      return { ok: false, summary: `Invalid input: ${parsed.error.message}` };
+    }
+    const { metric_type, window_days, aggregation } = parsed.data;
+
+    const since = new Date(Date.now() - window_days * 86_400_000).toISOString();
+    const { data, error } = await ctx.supabase
+      .from("health_metrics")
+      .select("value, unit, recorded_at")
+      .eq("user_id", ctx.userId)
+      .eq("metric_type", metric_type)
+      .gte("recorded_at", since)
+      .order("recorded_at", { ascending: false })
+      .limit(5000);
+
+    if (error) return { ok: false, summary: `DB error: ${error.message}` };
+    const rows = data ?? [];
+    if (rows.length === 0) {
+      return {
+        ok: true,
+        summary: `No ${metric_type.replace(/_/g, " ")} data in the last ${window_days} days.`,
+      };
+    }
+
+    const values = rows.map((r) => Number(r.value));
+    const unit = rows[0].unit ?? "";
+    let result: number;
+    let label: string;
+
+    switch (aggregation) {
+      case "latest":
+        result = values[0];
+        label = "latest";
+        break;
+      case "sum":
+        result = values.reduce((s, v) => s + v, 0);
+        label = `${window_days}d total`;
+        break;
+      case "avg":
+        result = values.reduce((s, v) => s + v, 0) / values.length;
+        label = `${window_days}d average`;
+        break;
+      case "min":
+        result = Math.min(...values);
+        label = `${window_days}d min`;
+        break;
+      case "max":
+        result = Math.max(...values);
+        label = `${window_days}d max`;
+        break;
+    }
+
+    const formatted = Number.isInteger(result)
+      ? result.toLocaleString()
+      : result.toFixed(1);
+    return {
+      ok: true,
+      summary: `${metric_type.replace(/_/g, " ")} · ${label}: ${formatted}${unit ? ` ${unit}` : ""} (${rows.length} sample${rows.length === 1 ? "" : "s"}).`,
+      data: { result, count: rows.length },
+    };
+  },
+};
+
+// ============================================================================
 // Registry
 // ============================================================================
 export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
@@ -1351,6 +1695,9 @@ export const TOOL_REGISTRY: Record<string, ToolDefinition> = {
   delete_list: deleteList,
   delete_event: deleteEvent,
   query_metric: queryMetric,
+  query_spending: querySpending,
+  log_health_metric: logHealthMetric,
+  query_health_metric: queryHealthMetric,
 };
 
 export const ALL_TOOLS: Anthropic.Tool[] = Object.values(TOOL_REGISTRY).map(

@@ -102,6 +102,29 @@ export function FinanceView({
 
   const empty = items.length === 0;
 
+  // Spending-by-category rollup over the same window the page pulls (30d).
+  // Plaid sends `category` as a hierarchical array — e.g. ["Food and Drink",
+  // "Restaurants", "Coffee Shop"]. Use the top-level entry to keep the
+  // breakdown short. Outflows only (positive `amount` is money leaving in
+  // Plaid's convention). Pending excluded so totals don't bounce day-to-day.
+  const spendingByCategory = useMemo(() => {
+    const totals = new Map<string, number>();
+    let totalOutflow = 0;
+    for (const t of transactions) {
+      if (t.pending) continue;
+      if (t.amount <= 0) continue;
+      const key = (t.category && t.category[0]) || "Uncategorized";
+      totals.set(key, (totals.get(key) ?? 0) + t.amount);
+      totalOutflow += t.amount;
+    }
+    return {
+      total: totalOutflow,
+      rows: Array.from(totals.entries())
+        .map(([category, amount]) => ({ category, amount }))
+        .sort((a, b) => b.amount - a.amount),
+    };
+  }, [transactions]);
+
   return (
     <div>
       <div className="flex justify-between items-start mb-6 flex-wrap gap-4">
@@ -285,6 +308,47 @@ export function FinanceView({
           )}
         </div>
       </div>
+
+      {/* Spending by category — last 30 days, outflows only */}
+      {spendingByCategory.rows.length > 0 && (
+        <div className="glass-strong rounded-2xl p-5 mt-4">
+          <div className="flex justify-between items-baseline mb-3">
+            <h3 className="font-bold text-sm">Spending by category (30d)</h3>
+            <span className="text-xs text-zinc-500">
+              {fmtUsd(spendingByCategory.total, { compact: true })} total · {transactions.filter((t) => !t.pending && t.amount > 0).length} txns
+            </span>
+          </div>
+          <div className="space-y-2">
+            {spendingByCategory.rows.slice(0, 8).map((row) => {
+              const pct = (row.amount / spendingByCategory.total) * 100;
+              return (
+                <div key={row.category}>
+                  <div className="flex justify-between items-baseline text-xs mb-1">
+                    <span className="text-zinc-300 truncate">{row.category}</span>
+                    <span className="text-zinc-500 ml-2 shrink-0">
+                      {fmtUsd(row.amount, { compact: true })} · {pct.toFixed(0)}%
+                    </span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-amber-400 to-rose-400"
+                      style={{ width: `${Math.max(2, pct)}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+            {spendingByCategory.rows.length > 8 && (
+              <div className="text-[10px] text-zinc-500 text-center pt-2">
+                +{spendingByCategory.rows.length - 8} more · {fmtUsd(
+                  spendingByCategory.rows.slice(8).reduce((s, r) => s + r.amount, 0),
+                  { compact: true }
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Savings goals */}
       <div className="mt-6">

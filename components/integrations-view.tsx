@@ -36,15 +36,28 @@ type GhlState = {
   lastSyncedAt: string | null;
 };
 
+type HealthState = {
+  configured: boolean;
+  totalSamples: number;
+  lastReceivedAt: string | null;
+  byType: Array<{ metric_type: string; count_7d: number; latest: string }>;
+};
+
 type Props = {
   googleCalendar: GoogleConnection | null;
   plaidItems: PlaidItem[];
   ghl: GhlState;
+  health: HealthState;
 };
 
 type SyncKind = "google_calendar" | "ghl" | "plaid";
 
-export function IntegrationsView({ googleCalendar, plaidItems, ghl }: Props) {
+export function IntegrationsView({
+  googleCalendar,
+  plaidItems,
+  ghl,
+  health,
+}: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [disconnecting, setDisconnecting] = useState(false);
@@ -477,7 +490,101 @@ export function IntegrationsView({ googleCalendar, plaidItems, ghl }: Props) {
             </p>
           )}
         </div>
+
+        {/* Apple Health — push-only via Health Auto Export, so no "sync now" */}
+        <div
+          id="apple-health"
+          className="glass rounded-2xl p-5 flex flex-col gap-3"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1">
+              <h3 className="font-bold flex items-center gap-2">
+                <span aria-hidden>❤️</span> Apple Health
+              </h3>
+              <p className="text-[11px] text-zinc-500 mt-1">
+                Pushed in via Health Auto Export ($6 iOS app) → our{" "}
+                <code className="text-[10px]">/api/health/ingest-hae</code>{" "}
+                endpoint.
+              </p>
+            </div>
+            {health.configured ? (
+              health.totalSamples > 0 ? (
+                <span className="text-[10px] px-2 py-1 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center gap-1 shrink-0">
+                  <CheckCircle className="size-3" /> {health.totalSamples.toLocaleString()} samples
+                </span>
+              ) : (
+                <span className="text-[10px] px-2 py-1 rounded-full bg-zinc-500/20 text-zinc-300 flex items-center gap-1 shrink-0">
+                  Awaiting first push
+                </span>
+              )
+            ) : (
+              <span className="text-[10px] px-2 py-1 rounded-full bg-zinc-500/20 text-zinc-300 flex items-center gap-1 shrink-0">
+                <XCircle className="size-3" /> Not configured
+              </span>
+            )}
+          </div>
+
+          {health.configured && health.lastReceivedAt && (
+            <div className="text-[11px] space-y-1.5">
+              <div className="flex justify-between text-zinc-400">
+                <span>Last sample received</span>
+                <span className="font-semibold text-zinc-200">
+                  {new Date(health.lastReceivedAt).toLocaleString()}
+                </span>
+              </div>
+              {health.byType.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-white/10">
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">
+                    Last 7 days · {health.byType.length} metric{health.byType.length === 1 ? "" : "s"}
+                  </div>
+                  <div className="space-y-0.5 max-h-40 overflow-y-auto">
+                    {health.byType.slice(0, 12).map((row) => (
+                      <div
+                        key={row.metric_type}
+                        className="flex justify-between text-[10px]"
+                      >
+                        <span className="text-zinc-400 truncate">{row.metric_type}</span>
+                        <span className="text-zinc-300 ml-2 shrink-0">
+                          {row.count_7d.toLocaleString()} ·{" "}
+                          {relativeMinutesAgo(row.latest)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {health.configured ? (
+            <p className="text-[11px] text-zinc-500 text-center py-1">
+              Health Auto Export pushes hourly — no manual sync needed.{" "}
+              <a
+                href="/health"
+                className="text-indigo-400 hover:underline"
+              >
+                Open Health →
+              </a>
+            </p>
+          ) : (
+            <p className="text-[11px] text-zinc-500 text-center py-1">
+              Set <code>HEALTH_INGEST_SECRET</code> + <code>HEALTH_INGEST_USER_ID</code> on Render, then configure HAE. See{" "}
+              <code>PHASE5-PROGRESS.md</code> for full setup.
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );
+}
+
+function relativeMinutesAgo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const min = Math.round(ms / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const d = Math.round(hr / 24);
+  return `${d}d ago`;
 }
