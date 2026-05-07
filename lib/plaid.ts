@@ -59,8 +59,17 @@ export function getPlaidClient(): PlaidApi {
 
 /**
  * Generate a link_token for the frontend to launch Plaid Link.
+ *
+ * `redirectUri` is REQUIRED for OAuth banks in Production (Chase, BofA,
+ * Wells Fargo, Capital One, etc.). The bank redirects the entire window
+ * to this URI after the user authenticates; the frontend then resumes
+ * Plaid Link with `receivedRedirectUri` set. Must also be registered in
+ * the Plaid dashboard → Team Settings → API → Allowed redirect URIs.
  */
-export async function createLinkToken(userId: string): Promise<string> {
+export async function createLinkToken(
+  userId: string,
+  redirectUri?: string
+): Promise<string> {
   const client = getPlaidClient();
   const res = await client.linkTokenCreate({
     user: { client_user_id: userId },
@@ -68,6 +77,7 @@ export async function createLinkToken(userId: string): Promise<string> {
     products: [Products.Transactions],
     country_codes: [CountryCode.Us],
     language: "en",
+    redirect_uri: redirectUri,
   });
   return res.data.link_token;
 }

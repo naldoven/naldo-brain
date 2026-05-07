@@ -122,6 +122,25 @@ export function IntegrationsView({ googleCalendar, plaidItems, ghl }: Props) {
   const [plaidLinkToken, setPlaidLinkToken] = useState<string | null>(null);
   const [plaidLoading, setPlaidLoading] = useState(false);
   const [disconnectingPlaid, setDisconnectingPlaid] = useState<string | null>(null);
+  const [plaidReceivedRedirectUri, setPlaidReceivedRedirectUri] = useState<
+    string | undefined
+  >(undefined);
+
+  // Detect OAuth resume on first render. When an OAuth bank (Chase, BofA, etc.)
+  // redirects the user back to /integrations, the URL contains oauth_state_id.
+  // The link_token we used before the redirect was stored in localStorage so
+  // we can re-instantiate Plaid Link and resume.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("oauth_state_id")) {
+      const saved = window.localStorage.getItem("plaid_link_token");
+      if (saved) {
+        setPlaidLinkToken(saved);
+        setPlaidReceivedRedirectUri(window.location.href);
+      }
+    }
+  }, []);
 
   const requestPlaidLinkToken = useCallback(async () => {
     setPlaidLoading(true);
@@ -132,12 +151,31 @@ export function IntegrationsView({ googleCalendar, plaidItems, ghl }: Props) {
         toast.error(`Plaid: ${data.error ?? "couldn't start link flow"}`);
         return;
       }
+      // Persist for OAuth resume — banks may bounce the user away and back.
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem("plaid_link_token", data.link_token);
+      }
       setPlaidLinkToken(data.link_token);
+      setPlaidReceivedRedirectUri(undefined);
     } catch {
       toast.error("Couldn't reach Plaid");
     } finally {
       setPlaidLoading(false);
     }
+  }, []);
+
+  const clearPlaidLinkState = useCallback(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem("plaid_link_token");
+      // Strip the OAuth state from the URL so a hard refresh doesn't try to resume
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("oauth_state_id")) {
+        url.searchParams.delete("oauth_state_id");
+        window.history.replaceState(null, "", url.pathname + url.search);
+      }
+    }
+    setPlaidLinkToken(null);
+    setPlaidReceivedRedirectUri(undefined);
   }, []);
 
   const onPlaidSuccess = useCallback(
@@ -153,22 +191,25 @@ export function IntegrationsView({ googleCalendar, plaidItems, ghl }: Props) {
         return;
       }
       toast.success(`Connected ${data.institution_name ?? "bank"}`);
-      setPlaidLinkToken(null);
+      clearPlaidLinkState();
       router.refresh();
     },
-    [router]
+    [router, clearPlaidLinkState]
   );
 
   const { open: openPlaid, ready: plaidReady } = usePlaidLink({
     token: plaidLinkToken,
+    receivedRedirectUri: plaidReceivedRedirectUri,
     onSuccess: onPlaidSuccess,
     onExit: (err) => {
       if (err) toast.error(`Plaid: ${err.display_message ?? err.error_message ?? "cancelled"}`);
-      setPlaidLinkToken(null);
+      clearPlaidLinkState();
     },
   });
 
-  // Auto-open Plaid Link as soon as the token arrives
+  // Auto-open Plaid Link as soon as the token arrives — works for both the
+  // initial open and the OAuth resume flow (since plaidLinkToken is set in
+  // both paths).
   useEffect(() => {
     if (plaidLinkToken && plaidReady) openPlaid();
   }, [plaidLinkToken, plaidReady, openPlaid]);
