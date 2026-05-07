@@ -551,8 +551,14 @@ type TxForSummary = {
 
 export function summarizeFinance(
   accounts: AccountForSummary[],
-  recentTransactions: TxForSummary[]
+  recentTransactions: TxForSummary[],
+  options: { baseline?: number } = {}
 ): FinanceSnapshot {
+  // The baseline is the "starting debt" we measure payoff against. Defaults to
+  // $55K (the business-debt goal). Pass `baseline: 0` for the Personal scope
+  // — there's no payoff target there, the snapshot just shows current balances.
+  const baseline = Math.max(0, options.baseline ?? DEBT_BASELINE_USD);
+
   let cashTotal = 0;
   let debtTotal = 0;
   for (const a of accounts) {
@@ -567,11 +573,9 @@ export function summarizeFinance(
     }
   }
 
-  const debtPaidOff = Math.max(0, DEBT_BASELINE_USD - debtTotal);
+  const debtPaidOff = Math.max(0, baseline - debtTotal);
   const debtPctPaid =
-    DEBT_BASELINE_USD > 0
-      ? Math.max(0, Math.min(1, debtPaidOff / DEBT_BASELINE_USD))
-      : 0;
+    baseline > 0 ? Math.max(0, Math.min(1, debtPaidOff / baseline)) : 0;
 
   let burn30d = 0;
   let income30d = 0;
@@ -586,7 +590,7 @@ export function summarizeFinance(
     cashTotal: round2(cashTotal),
     debtTotal: round2(debtTotal),
     debtPaidOff: round2(debtPaidOff),
-    debtBaseline: DEBT_BASELINE_USD,
+    debtBaseline: baseline,
     debtPctPaid: +debtPctPaid.toFixed(3),
     netLiquid: round2(cashTotal - debtTotal),
     burn30d: round2(burn30d),

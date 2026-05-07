@@ -19,7 +19,7 @@ export default async function IntegrationsPage() {
         .maybeSingle(),
       supabase
         .from("plaid_items")
-        .select("id, institution_name, status, last_synced_at")
+        .select("id, institution_name, status, last_synced_at, scope")
         .eq("user_id", user!.id)
         .order("created_at"),
       supabase

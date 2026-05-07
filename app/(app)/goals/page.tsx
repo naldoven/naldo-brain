@@ -63,16 +63,27 @@ export default async function GoalsPage() {
         .from("gohighlevel_opportunities")
         .select("monetary_value, pipeline_name, status")
         .eq("user_id", user.id),
+      // Only BUSINESS-scoped accounts feed the $55K debt-payoff bar.
+      // The two-step query pattern (look up business item ids, filter
+      // accounts by them) is more verbose than a !inner join, but
+      // PostgREST joins through nested embeds are picky and we already
+      // have the items we need.
       supabase
         .from("plaid_accounts")
-        .select("type, current_balance, is_debt, is_active")
+        .select(
+          "type, current_balance, is_debt, is_active, item_id, plaid_items!inner(scope)"
+        )
         .eq("user_id", user.id)
-        .eq("is_active", true),
+        .eq("is_active", true)
+        .eq("plaid_items.scope", "business"),
       supabase
         .from("plaid_transactions")
-        .select("amount, date")
+        .select(
+          "amount, date, account_id, plaid_accounts!inner(plaid_items!inner(scope))"
+        )
         .eq("user_id", user.id)
         .gte("date", thirtyDaysAgo)
+        .eq("plaid_accounts.plaid_items.scope", "business")
         .limit(5000),
       supabase
         .from("savings_goals")

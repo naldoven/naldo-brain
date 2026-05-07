@@ -28,6 +28,7 @@ type PlaidItem = {
   institution_name: string | null;
   status: string;
   last_synced_at: string | null;
+  scope: "personal" | "business";
 };
 
 type GhlState = {
@@ -227,6 +228,24 @@ export function IntegrationsView({
     if (plaidLinkToken && plaidReady) openPlaid();
   }, [plaidLinkToken, plaidReady, openPlaid]);
 
+  const [scopingItem, setScopingItem] = useState<string | null>(null);
+  async function setPlaidItemScope(itemId: string, scope: "personal" | "business") {
+    setScopingItem(itemId);
+    const res = await fetch("/api/plaid/set-scope", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_id: itemId, scope }),
+    });
+    setScopingItem(null);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      toast.error(`Couldn't tag: ${data.error ?? "update failed"}`);
+      return;
+    }
+    toast.success(`Tagged as ${scope}`);
+    router.refresh();
+  }
+
   async function disconnectPlaidItem(itemId: string, label: string) {
     if (!confirm(`Disconnect ${label}? Synced accounts + transactions will be removed.`)) {
       return;
@@ -366,31 +385,65 @@ export function IntegrationsView({
               {plaidItems.map((it) => (
                 <div
                   key={it.id}
-                  className="bg-white/5 rounded-lg p-3 text-xs flex items-center justify-between gap-3"
+                  className="bg-white/5 rounded-lg p-3 text-xs"
                 >
-                  <div className="min-w-0">
-                    <div className="font-semibold truncate">
-                      {it.institution_name ?? "Bank connection"}
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <div className="min-w-0">
+                      <div className="font-semibold truncate">
+                        {it.institution_name ?? "Bank connection"}
+                      </div>
+                      <div className="text-[10px] text-zinc-500">
+                        status: {it.status}
+                        {it.last_synced_at
+                          ? ` · last sync ${new Date(it.last_synced_at).toLocaleString()}`
+                          : " · never synced"}
+                      </div>
                     </div>
-                    <div className="text-[10px] text-zinc-500">
-                      status: {it.status}
-                      {it.last_synced_at
-                        ? ` · last sync ${new Date(it.last_synced_at).toLocaleString()}`
-                        : " · never synced"}
-                    </div>
+                    <button
+                      onClick={() =>
+                        disconnectPlaidItem(it.id, it.institution_name ?? "this connection")
+                      }
+                      disabled={disconnectingPlaid === it.id}
+                      className="text-[11px] px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 text-red-300 disabled:opacity-50 flex items-center gap-1 shrink-0"
+                    >
+                      {disconnectingPlaid === it.id && (
+                        <Loader2 className="size-3 animate-spin" />
+                      )}
+                      Disconnect
+                    </button>
                   </div>
-                  <button
-                    onClick={() =>
-                      disconnectPlaidItem(it.id, it.institution_name ?? "this connection")
-                    }
-                    disabled={disconnectingPlaid === it.id}
-                    className="text-[11px] px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 text-red-300 disabled:opacity-50 flex items-center gap-1 shrink-0"
-                  >
-                    {disconnectingPlaid === it.id && (
-                      <Loader2 className="size-3 animate-spin" />
-                    )}
-                    Disconnect
-                  </button>
+                  {/* Scope toggle */}
+                  <div className="flex items-center gap-1 text-[10px]">
+                    <span className="text-zinc-500 mr-1">Tag:</span>
+                    <button
+                      onClick={() => setPlaidItemScope(it.id, "personal")}
+                      disabled={scopingItem === it.id || it.scope === "personal"}
+                      className={`px-2 py-0.5 rounded-full border ${
+                        it.scope === "personal"
+                          ? "bg-indigo-500/30 border-indigo-400 text-indigo-200"
+                          : "bg-white/5 border-white/10 text-zinc-400 hover:bg-white/10"
+                      } disabled:cursor-default flex items-center gap-1`}
+                    >
+                      {scopingItem === it.id && it.scope !== "personal" && (
+                        <Loader2 className="size-2.5 animate-spin" />
+                      )}
+                      Personal
+                    </button>
+                    <button
+                      onClick={() => setPlaidItemScope(it.id, "business")}
+                      disabled={scopingItem === it.id || it.scope === "business"}
+                      className={`px-2 py-0.5 rounded-full border ${
+                        it.scope === "business"
+                          ? "bg-amber-500/30 border-amber-400 text-amber-200"
+                          : "bg-white/5 border-white/10 text-zinc-400 hover:bg-white/10"
+                      } disabled:cursor-default flex items-center gap-1`}
+                    >
+                      {scopingItem === it.id && it.scope !== "business" && (
+                        <Loader2 className="size-2.5 animate-spin" />
+                      )}
+                      Business
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
