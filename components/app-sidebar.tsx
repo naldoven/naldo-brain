@@ -21,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DebtProgressMini } from "@/components/debt-progress-card";
 
 type NavItem = {
   href: string;
@@ -139,6 +140,9 @@ export function AppSidebar({ user, mobileOpen, onMobileClose }: AppSidebarProps)
                 {user.phone || user.email || ""}
               </div>
             </div>
+          </div>
+          <div className="mt-3">
+            <DebtProgressMini />
           </div>
           <div className="text-[10px] text-zinc-500 px-2 mt-2">
             Debt free. House. Ring. 🎄
