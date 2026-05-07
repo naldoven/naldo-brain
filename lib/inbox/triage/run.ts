@@ -361,12 +361,14 @@ export async function runTriageForAccount(
         }
         action = "queued_no_draft";
         status = "dismissed";
+        stats.queuedNoDraft++;
       } else if (isSilent) {
         if (chosenLabel?.gmail_label_id) {
           await applyGmailLabel(gmail, messageId, chosenLabel.gmail_label_id, false);
         }
         action = "queued_no_draft";
         status = "dismissed";
+        stats.queuedNoDraft++;
       } else if (wantsArchive) {
         if (chosenLabel?.gmail_label_id) {
           await applyGmailLabel(gmail, messageId, chosenLabel.gmail_label_id, true);

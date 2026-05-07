@@ -117,8 +117,16 @@ export async function POST(
     }
   }
 
-  const shouldArchive = newLabel?.default_action === "archive_only";
-  const shouldTrash = newLabel?.default_action === "trash_only";
+  // Manual label changes from the dashboard act IMMEDIATELY (no 24h wait).
+  // The _after_24h variants exist for Claude's auto-classifications, where the
+  // delay gives the user a chance to override; when the user clicks the dropdown
+  // they've already reviewed, so we treat them as their immediate counterparts.
+  const shouldArchive =
+    newLabel?.default_action === "archive_only" ||
+    newLabel?.default_action === "archive_after_24h";
+  const shouldTrash =
+    newLabel?.default_action === "trash_only" ||
+    newLabel?.default_action === "trash_after_24h";
   if (newLabel?.gmail_label_id) {
     try {
       await applyGmailLabel(
@@ -152,8 +160,12 @@ export async function POST(
   let newDraftId: string | null | undefined = undefined;
   if (newLabel) {
     switch (newLabel.default_action) {
+      // Immediate actions: archive_only/trash_only (and *_after_24h when applied
+      // manually from the dashboard — see comment above the shouldArchive logic)
       case "archive_only":
       case "trash_only":
+      case "archive_after_24h":
+      case "trash_after_24h":
         newStatus = "archived";
         if (message.gmail_draft_id) {
           try {
@@ -174,10 +186,6 @@ export async function POST(
           }
           newDraftId = null;
         }
-        break;
-      case "archive_after_24h":
-      case "trash_after_24h":
-        newStatus = "dismissed";
         break;
       case "surface_no_draft":
       case "surface_with_draft":
