@@ -58,6 +58,31 @@ export function getPlaidClient(): PlaidApi {
 // ---- Public helpers ------------------------------------------------------
 
 /**
+ * Plaid SDK errors are axios errors — the structured Plaid error body
+ * lives at err.response.data. Surface the error_code + display_message
+ * so we get something like "INVALID_REDIRECT_URI: this URI is not in
+ * the allowlist" instead of a generic "Request failed with status 400".
+ */
+function plaidErrorMessage(err: unknown): string {
+  if (err && typeof err === "object" && "response" in err) {
+    const data = (err as { response?: { data?: unknown } }).response?.data as
+      | {
+          error_code?: string;
+          error_message?: string;
+          error_type?: string;
+          display_message?: string;
+        }
+      | undefined;
+    if (data) {
+      const code = data.error_code ?? "PLAID_ERROR";
+      const msg = data.display_message ?? data.error_message ?? "no message";
+      return `${code} — ${msg}`;
+    }
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
  * Generate a link_token for the frontend to launch Plaid Link.
  *
  * `redirectUri` is REQUIRED for OAuth banks in Production (Chase, BofA,
@@ -71,15 +96,19 @@ export async function createLinkToken(
   redirectUri?: string
 ): Promise<string> {
   const client = getPlaidClient();
-  const res = await client.linkTokenCreate({
-    user: { client_user_id: userId },
-    client_name: "Naldo's Brain",
-    products: [Products.Transactions],
-    country_codes: [CountryCode.Us],
-    language: "en",
-    redirect_uri: redirectUri,
-  });
-  return res.data.link_token;
+  try {
+    const res = await client.linkTokenCreate({
+      user: { client_user_id: userId },
+      client_name: "Naldo's Brain",
+      products: [Products.Transactions],
+      country_codes: [CountryCode.Us],
+      language: "en",
+      redirect_uri: redirectUri,
+    });
+    return res.data.link_token;
+  } catch (err) {
+    throw new Error(`linkTokenCreate: ${plaidErrorMessage(err)}`);
+  }
 }
 
 /**
