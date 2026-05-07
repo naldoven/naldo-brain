@@ -86,13 +86,13 @@ export function FinanceView({
       {empty && <EmptyState />}
 
       <ScopeSection
-        scope="business"
-        title="Business"
-        subtitle="YLL accounts. The $55K debt-free goal lives here."
-        snapshot={businessSnapshot}
+        scope="personal"
+        title="Personal"
+        subtitle="Personal accounts. The $55K debt-free goal lives here."
+        snapshot={personalSnapshot}
         debtBaseline={debtBaseline}
-        accounts={accounts.filter((a) => a.scope === "business")}
-        transactions={transactions.filter((t) => t.scope === "business")}
+        accounts={accounts.filter((a) => a.scope === "personal")}
+        transactions={transactions.filter((t) => t.scope === "personal")}
         itemById={itemById}
         showHero
       />
@@ -100,13 +100,13 @@ export function FinanceView({
       <div className="my-6 border-t border-white/5" />
 
       <ScopeSection
-        scope="personal"
-        title="Personal"
-        subtitle="Personal accounts — household cash, mortgage, personal cards."
-        snapshot={personalSnapshot}
+        scope="business"
+        title="Business"
+        subtitle="YLL accounts — cash flow + balances (no debt to pay off)."
+        snapshot={businessSnapshot}
         debtBaseline={0}
-        accounts={accounts.filter((a) => a.scope === "personal")}
-        transactions={transactions.filter((t) => t.scope === "personal")}
+        accounts={accounts.filter((a) => a.scope === "business")}
+        transactions={transactions.filter((t) => t.scope === "business")}
         itemById={itemById}
         showHero={false}
       />
@@ -193,7 +193,7 @@ function ScopeSection({
               <div className="flex items-start justify-between gap-6 flex-wrap">
                 <div>
                   <div className="text-xs text-zinc-400 flex items-center gap-2 mb-1">
-                    <TrendingDown className="size-3.5" /> Business debt payoff
+                    <TrendingDown className="size-3.5" /> Debt payoff
                   </div>
                   <div className="text-4xl font-bold">
                     {fmtUsd(snapshot.debtPaidOff)}{" "}

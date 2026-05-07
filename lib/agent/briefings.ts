@@ -515,9 +515,9 @@ export async function gatherBriefContext(
       .eq("user_id", userId)
       .gte("ghl_created_at", oneWeekAgo.toISOString()),
 
-    // Plaid accounts — BUSINESS only. The FINANCE SNAPSHOT block in briefings
-    // talks about the $55K debt goal, which is business debt. Personal cash
-    // + mortgage + student loan would distort the headline number.
+    // Plaid accounts — PERSONAL only. The $55K debt goal is personal
+    // (YLL business has no debt to pay off). Brain reasons about
+    // personal cash + personal debt vs the $55K target.
     supabase
       .from("plaid_accounts")
       .select(
@@ -525,9 +525,9 @@ export async function gatherBriefContext(
       )
       .eq("user_id", userId)
       .eq("is_active", true)
-      .eq("plaid_items.scope", "business"),
+      .eq("plaid_items.scope", "personal"),
 
-    // Business transactions in last 30 days — for income/burn
+    // Personal transactions in last 30 days — for income/burn
     supabase
       .from("plaid_transactions")
       .select(
@@ -535,7 +535,7 @@ export async function gatherBriefContext(
       )
       .eq("user_id", userId)
       .gte("date", new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10))
-      .eq("plaid_accounts.plaid_items.scope", "business")
+      .eq("plaid_accounts.plaid_items.scope", "personal")
       .limit(5000),
   ]);
 

@@ -109,8 +109,9 @@ export default async function OverviewPage() {
       .select("monetary_value")
       .eq("user_id", user.id)
       .eq("status", "open"),
-    // Overview is business-goal focused, so debt + flow KPIs use BUSINESS
-    // scope only. Personal numbers belong on /finance, not the home page.
+    // The $55K debt-payoff KPI on /overview tracks PERSONAL debt (YLL
+    // business has no debt to pay off). 30-day flow follows the same scope
+    // for consistency — it's the cash that actually services the debt.
     supabase
       .from("plaid_accounts")
       .select(
@@ -118,7 +119,7 @@ export default async function OverviewPage() {
       )
       .eq("user_id", user.id)
       .eq("is_active", true)
-      .eq("plaid_items.scope", "business"),
+      .eq("plaid_items.scope", "personal"),
     supabase
       .from("plaid_transactions")
       .select(
@@ -126,7 +127,7 @@ export default async function OverviewPage() {
       )
       .eq("user_id", user.id)
       .gte("date", thirtyDaysAgoIso)
-      .eq("plaid_accounts.plaid_items.scope", "business")
+      .eq("plaid_accounts.plaid_items.scope", "personal")
       .limit(5000),
     supabase
       .from("health_metrics")

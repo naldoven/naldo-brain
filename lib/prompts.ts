@@ -1,6 +1,6 @@
 export const NALDOS_GOALS = `
 - Hit $500K revenue this year
-- Pay off $55K business debt
+- Pay off $55K personal debt (YLL business has no debt — this is personal)
 - Complete 5-6 permanent lighting jobs
 - Land 10+ event/wedding lighting jobs
 - Add 50+ holiday lighting homes

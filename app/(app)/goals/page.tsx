@@ -63,11 +63,8 @@ export default async function GoalsPage() {
         .from("gohighlevel_opportunities")
         .select("monetary_value, pipeline_name, status")
         .eq("user_id", user.id),
-      // Only BUSINESS-scoped accounts feed the $55K debt-payoff bar.
-      // The two-step query pattern (look up business item ids, filter
-      // accounts by them) is more verbose than a !inner join, but
-      // PostgREST joins through nested embeds are picky and we already
-      // have the items we need.
+      // The $55K debt-payoff bar tracks PERSONAL debt (YLL business has
+      // no debt). Only personal-scoped Plaid accounts feed this bar.
       supabase
         .from("plaid_accounts")
         .select(
@@ -75,7 +72,7 @@ export default async function GoalsPage() {
         )
         .eq("user_id", user.id)
         .eq("is_active", true)
-        .eq("plaid_items.scope", "business"),
+        .eq("plaid_items.scope", "personal"),
       supabase
         .from("plaid_transactions")
         .select(
@@ -83,7 +80,7 @@ export default async function GoalsPage() {
         )
         .eq("user_id", user.id)
         .gte("date", thirtyDaysAgo)
-        .eq("plaid_accounts.plaid_items.scope", "business")
+        .eq("plaid_accounts.plaid_items.scope", "personal")
         .limit(5000),
       supabase
         .from("savings_goals")
